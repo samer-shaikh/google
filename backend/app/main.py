@@ -8,6 +8,12 @@ from app.routes.seo import router as seo_router
 from app.routes.upload import router as upload_router
 from app.routes.workflow import router as workflow_router
 
+from app.database import Base, engine
+
+from app.models.creator_profile import CreatorProfile
+
+Base.metadata.create_all(bind=engine)
+
 app = FastAPI(
     title="AI Content Studio",
     description="Multi-agent content creation platform for YouTube",
