@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 from app.models.plan import Plan
+from app.models.user import User
+from app.dependencies.auth import get_current_user
 
 from app.agents.script_agent import script_agent
 
