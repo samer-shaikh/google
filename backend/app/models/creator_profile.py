@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
+from pydantic import BaseModel
 
 from app.database import Base
 
@@ -41,3 +42,20 @@ class CreatorProfile(Base):
         server_default=func.now(),
         onupdate=func.now(),
     )
+
+
+# ── Output schema ──────────────────────────────────────────────────────────────
+# Defined as Pydantic so LLM output is validated before touching the DB.
+# If Gemini/Qwen returns a malformed response, we raise a clear error
+# instead of silently storing garbage.
+
+class CreatorProfileOutput(BaseModel):
+    creator_niche: str
+    main_topics: list[str]
+    audience_type: str
+    audience_level: str          # "beginner" | "intermediate" | "advanced"
+    title_style: str
+    description_style: str
+    content_strengths: list[str]
+    recommended_video_types: list[str]
+    viral_patterns: list[str]

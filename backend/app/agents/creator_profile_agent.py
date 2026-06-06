@@ -23,23 +23,9 @@ from app.models.youtube_video import YouTubeVideo
 from app.models.creator_profile import CreatorProfile
 from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
+from app.models.creator_profile import CreatorProfileOutput
 
 
-# ── Output schema ──────────────────────────────────────────────────────────────
-# Defined as Pydantic so LLM output is validated before touching the DB.
-# If Gemini/Qwen returns a malformed response, we raise a clear error
-# instead of silently storing garbage.
-
-class CreatorProfileOutput(BaseModel):
-    creator_niche: str
-    main_topics: list[str]
-    audience_type: str
-    audience_level: str          # "beginner" | "intermediate" | "advanced"
-    title_style: str
-    description_style: str
-    content_strengths: list[str]
-    recommended_video_types: list[str]
-    viral_patterns: list[str]
 
 
 # ── Prompt version — bump this string whenever you change the prompt ──────────

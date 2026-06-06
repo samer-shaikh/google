@@ -1,5 +1,5 @@
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 
@@ -8,6 +8,8 @@ from langgraph.types import Command
 from app.graph.workflow import graph
 from app.graph.upload_workflow import upload_graph
 from app.models.plan import Plan
+from app.dependencies.auth import get_current_user
+from app.models.user import User
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
@@ -45,17 +47,24 @@ def _paused_at(state) -> str:
 # ── Main pipeline ─────────────────────────────────────────────────
 
 @router.post("/run")
-def run_workflow(data: WorkflowStartRequest):
+def run_workflow(
+    data: WorkflowStartRequest,
+    current_user: User = Depends(get_current_user),
+):
     """
     Starts the pipeline.
-    Runs Research then pauses at human_approval (HITL #1).
-    Returns thread_id + research for the user to review.
+    Loads creator profile from DB, runs Research,
+    then pauses at human_approval (HITL #1).
     """
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
     result = graph.invoke(
-        {"topic": data.topic, "plan": data.plan.value},
+        {
+            "topic":   data.topic,
+            "plan":    data.plan.value,
+            "user_id": current_user.id,   # passed to load_profile_node
+        },
         config=config,
     )
 
@@ -154,13 +163,14 @@ def select_idea(data: IdeaSelectRequest):
     return {
         "thread_id": data.thread_id,
         "status": "completed",
-        "topic":        result.get("topic", ""),
-        "research":     result.get("research", ""),
-        "ideas":        result.get("ideas", []),
-        "selected_idea":result.get("selected_idea", data.selected_idea),
-        "script":       result.get("script", ""),
-        "thumbnail":    result.get("thumbnail", ""),
-        "seo":          result.get("seo", ""),
+        "topic":          result.get("topic", ""),
+        "research":       result.get("research", ""),
+        "ideas":          result.get("ideas", []),
+        "selected_idea":  result.get("selected_idea", data.selected_idea),
+        "script":         result.get("script", ""),
+        "thumbnail":      result.get("thumbnail", ""),
+        "seo":            result.get("seo", ""),
+        "creator_profile":result.get("creator_profile", {}),
     }
 
 
