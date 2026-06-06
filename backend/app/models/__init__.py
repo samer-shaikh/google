@@ -5,4 +5,5 @@ from .creator_profile import CreatorProfile
 from .plan import Plan
 from .thread import Thread
 from .youtube_account import YouTubeAccount
-from app.models.youtube_video import YouTubeVideo
+from .youtube_video import YouTubeVideo
+from .upload_record import UploadRecord

@@ -9,10 +9,10 @@ It belongs in the Upload Workflow (upload_workflow.py) which runs
 separately when the user is ready to publish to YouTube.
 """
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
 
 from app.graph.state import AgentState
+from app.graph.checkpointer import get_checkpointer
 
 from app.agents.research_agent import research_agent
 from app.agents.video_idea_agent import video_idea_agent
@@ -205,7 +205,7 @@ def handle_rejection_node(state: AgentState) -> dict:
 
 # ── Graph construction ───────────────────────────────────────────
 
-def _build_graph(checkpointer: MemorySaver):
+def _build_graph(checkpointer):
     builder = StateGraph(AgentState)
 
     builder.add_node("load_profile",     load_profile_node)
@@ -243,11 +243,7 @@ def _build_graph(checkpointer: MemorySaver):
 import sys as _sys
 _MODULE = _sys.modules[__name__]
 
-if not hasattr(_MODULE, "_checkpointer"):
-    _MODULE._checkpointer = MemorySaver()
-
 if not hasattr(_MODULE, "_graph"):
-    _MODULE._graph = _build_graph(_MODULE._checkpointer)
+    _MODULE._graph = _build_graph(get_checkpointer())
 
-checkpointer: MemorySaver = _MODULE._checkpointer
 graph = _MODULE._graph

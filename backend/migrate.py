@@ -36,6 +36,9 @@ with engine.connect() as conn:
     print("Dropping generations...")
     conn.execute(text("DROP TABLE IF EXISTS generations CASCADE"))
 
+    print("Dropping upload_records...")
+    conn.execute(text("DROP TABLE IF EXISTS upload_records CASCADE"))
+
     conn.commit()
     print("Tables dropped.")
 
@@ -53,6 +56,7 @@ from app.models.generation import Generation              # noqa
 from app.models.plan import Plan                          # noqa
 from app.models.thread import Thread                      # noqa
 from app.models.project import Project                    # noqa
+from app.models.upload_record import UploadRecord         # noqa
 
 Base.metadata.create_all(bind=engine)
 

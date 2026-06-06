@@ -44,8 +44,8 @@ class CreatorProfileState(TypedDict, total=False):
 # SEO generation lives here, not in the content generation workflow.
 
 class UploadState(TypedDict, total=False):
-    # Inputs — passed in when starting the upload workflow
-    generation_id: int          # links back to the completed generation
+    # Inputs
+    generation_id: int
     user_id: int
     plan: str
 
@@ -54,21 +54,40 @@ class UploadState(TypedDict, total=False):
     script: str
     thumbnail: str
 
-    # SEO outputs — generated inside this workflow
+    # Video file path — provided by the user when starting the upload workflow
+    # Must be an absolute path to a .mp4 / .mov file on the server
+    video_file_path: str
+
+    # SEO outputs
     seo_title: str
     seo_description: str
     seo_tags: list[str]
     seo_hashtags: list[str]
     seo_category: str
 
-    # Upload metadata — filled by user review or agent suggestion
-    privacy_status: str         # "private" | "unlisted" | "public"
-    scheduled_at: Optional[str] # ISO datetime string or None
+    # Upload metadata
+    privacy_status: str
+    scheduled_at: Optional[str]
 
-    # Upload results
-    youtube_video_id: str       # returned by YouTube API after upload
-    upload_status: str          # "pending" | "uploaded" | "failed"
+    # Thumbnail upload result
+    thumbnail_uploaded: bool
+    thumbnail_status: str       # "uploaded" | "failed" | "skipped"
+    thumbnail_error: Optional[str]
+
+    # Video upload result
+    youtube_video_id: str
+    youtube_video_url: str
+    upload_status: str          # "pending" | "uploaded" | "failed" | "cancelled"
     upload_error: Optional[str]
 
-    # HITL — user reviews SEO + metadata before upload
+    # Upload record ID — created before upload, updated after
+    upload_record_id: int
+
+    # Which provider was used
+    provider_used: str          # "api" | "mcp"
+
+    # Published timestamp
+    published_at: Optional[str]
+
+    # HITL
     seo_approved: Optional[bool]

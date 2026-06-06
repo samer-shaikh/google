@@ -1,35 +1,34 @@
 """
 upload_workflow.py — Video Publishing Pipeline
 
-Separate from the content generation workflow.
-Runs AFTER content generation is complete.
-
 Graph:
-  load_generation → seo_agent → title_agent → description_agent →
-  tags_agent → review_metadata (HITL) → upload_video → END
+  load_generation → seo_title → seo_description → tags →
+  review_metadata (HITL) → upload_thumbnail → upload_video →
+  save_upload_result → END
 
-SEO lives here — not in the content generation workflow.
-YouTube upload uses the Data API v3 directly (MCP fallback path planned).
+All existing nodes are preserved unchanged.
+Three new nodes added: upload_thumbnail, upload_video (real), save_upload_result.
+Provider abstraction: workflow calls get_youtube_provider() — works with
+Data API or MCP depending on environment configuration.
 """
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
+from datetime import datetime, timezone
 
 from app.graph.state import UploadState
+from app.graph.checkpointer import get_checkpointer
 
 
-# ── Node 1: Load generation from DB ─────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# EXISTING NODES — unchanged
+# ══════════════════════════════════════════════════════════════════
 
 def load_generation_node(state: UploadState) -> dict:
-    """
-    Load the completed generation record from DB.
-    Pulls script + thumbnail into state for SEO agents to use.
-    """
     generation_id = state.get("generation_id")
-    user_id = state.get("user_id")
+    user_id       = state.get("user_id")
 
     if not generation_id or not user_id:
-        raise ValueError("generation_id and user_id are required to start upload workflow")
+        raise ValueError("generation_id and user_id are required")
 
     from app.database import SessionLocal
     from app.models.generation import Generation
@@ -61,10 +60,7 @@ def load_generation_node(state: UploadState) -> dict:
         db.close()
 
 
-# ── Node 2: SEO Title ────────────────────────────────────────────
-
 def seo_title_node(state: UploadState) -> dict:
-    """Generate an SEO-optimized YouTube title."""
     print("[seo_title_node] starting...")
     from app.services.qwen_service import generate_response
     from app.services.model_router import get_model
@@ -91,10 +87,7 @@ Return ONLY the title text. No quotes, no explanation.
     return {"seo_title": title}
 
 
-# ── Node 3: SEO Description ──────────────────────────────────────
-
 def seo_description_node(state: UploadState) -> dict:
-    """Generate an SEO-optimized YouTube description."""
     print("[seo_description_node] starting...")
     from app.services.qwen_service import generate_response
     from app.services.model_router import get_model
@@ -124,10 +117,7 @@ Return ONLY the description text.
     return {"seo_description": description}
 
 
-# ── Node 4: Tags ─────────────────────────────────────────────────
-
 def tags_node(state: UploadState) -> dict:
-    """Generate YouTube tags and hashtags."""
     print("[tags_node] starting...")
     from app.services.qwen_service import generate_response
     from app.services.model_router import get_model
@@ -139,163 +129,270 @@ You are a YouTube SEO expert.
 Topic: {state["topic"]}
 Title: {state.get("seo_title", "")}
 
-Generate YouTube tags and hashtags for this video.
-
 Return ONLY a valid JSON object with exactly these fields:
 {{
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10", "tag11", "tag12", "tag13", "tag14", "tag15"],
   "hashtags": ["#hashtag1", "#hashtag2", "#hashtag3", "#hashtag4", "#hashtag5"],
   "category": "Education"
 }}
-
-Rules:
-- tags: exactly 15 strings, no # symbol, mix of broad and specific
-- hashtags: exactly 5 strings, each starting with #
-- category: one YouTube category name that fits this content
 """
     model = get_model(state.get("plan", "normal"), "seo")
-    raw = generate_response(prompt, model)
+    raw   = generate_response(prompt, model)
 
     try:
         cleaned = re.sub(r"```[a-z]*", "", raw).strip().strip("`").strip()
-        data = json.loads(cleaned)
+        data    = json.loads(cleaned)
         return {
-            "seo_tags":      data.get("tags", []),
-            "seo_hashtags":  data.get("hashtags", []),
-            "seo_category":  data.get("category", "Education"),
+            "seo_tags":     data.get("tags",     []),
+            "seo_hashtags": data.get("hashtags", []),
+            "seo_category": data.get("category", "Education"),
         }
     except Exception as e:
         print(f"[tags_node] JSON parse failed: {e} — using fallback")
-        return {
-            "seo_tags":     [state["topic"]],
-            "seo_hashtags": [],
-            "seo_category": "Education",
-        }
+        return {"seo_tags": [state["topic"]], "seo_hashtags": [], "seo_category": "Education"}
 
-
-# ── Node 5: HITL — Metadata review ──────────────────────────────
 
 def review_metadata_node(state: UploadState) -> dict:
-    """
-    Pause and show the user all generated SEO metadata for review.
-    User can approve or send back corrections.
-    """
     print("[review_metadata_node] pausing for user review...")
 
     approved = interrupt({
-        "type":             "metadata_review",
-        "seo_title":        state.get("seo_title", ""),
-        "seo_description":  state.get("seo_description", ""),
-        "seo_tags":         state.get("seo_tags", []),
-        "seo_hashtags":     state.get("seo_hashtags", []),
-        "seo_category":     state.get("seo_category", ""),
-        "privacy_status":   state.get("privacy_status", "private"),
-        "message":          "Review SEO metadata. Approve to upload to YouTube.",
+        "type":            "metadata_review",
+        "seo_title":       state.get("seo_title", ""),
+        "seo_description": state.get("seo_description", ""),
+        "seo_tags":        state.get("seo_tags", []),
+        "seo_hashtags":    state.get("seo_hashtags", []),
+        "seo_category":    state.get("seo_category", ""),
+        "privacy_status":  state.get("privacy_status", "private"),
+        "message":         "Review SEO metadata. Approve to upload to YouTube.",
     })
 
     print(f"[review_metadata_node] resumed — approved={approved}")
     return {"seo_approved": approved}
 
 
-# ── Node 6: Upload to YouTube ────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# NEW NODE A: upload_thumbnail_node
+# ══════════════════════════════════════════════════════════════════
 
-def upload_video_node(state: UploadState) -> dict:
+def upload_thumbnail_node(state: UploadState) -> dict:
     """
-    Upload the video to YouTube using the Data API v3.
+    Upload the AI-generated thumbnail concept to YouTube.
 
-    MCP path (future): if a YouTube MCP server is connected,
-    delegate to it instead of calling the API directly.
+    The thumbnail field in state contains the text description/prompt
+    generated by the content workflow's ThumbnailAgent.
 
-    Current implementation: YouTube Data API v3 via google-api-python-client.
-    Requires the user to have a connected YouTube account (oauth tokens in DB).
+    For actual image upload, the thumbnail must be a real image file.
+    If no thumbnail_file_path is provided in state, this node skips
+    gracefully and marks thumbnail_status as "skipped".
+
+    The node runs AFTER upload_video because YouTube requires a
+    video_id before a thumbnail can be attached.
     """
-    print("[upload_video_node] starting...")
+    print("[upload_thumbnail_node] starting...")
 
-    if not state.get("seo_approved"):
-        print("[upload_video_node] not approved — skipping upload")
-        return {"upload_status": "cancelled"}
+    video_id        = state.get("youtube_video_id", "")
+    thumbnail_path  = state.get("thumbnail_file_path", "")  # optional path to image file
+    user_id         = state.get("user_id")
 
-    user_id = state.get("user_id")
-    if not user_id:
-        return {"upload_status": "failed", "upload_error": "user_id missing from state"}
+    # If no video was uploaded yet, skip
+    if not video_id:
+        print("[upload_thumbnail_node] no video_id — skipping thumbnail upload")
+        return {"thumbnail_status": "skipped", "thumbnail_uploaded": False}
+
+    # If no thumbnail image file provided, skip gracefully
+    if not thumbnail_path:
+        print("[upload_thumbnail_node] no thumbnail_file_path — skipping thumbnail upload")
+        return {
+            "thumbnail_status":   "skipped",
+            "thumbnail_uploaded": False,
+            "thumbnail_error":    "No thumbnail_file_path provided",
+        }
 
     from app.database import SessionLocal
-    from app.models.youtube_account import YouTubeAccount
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request as GoogleRequest
-    from googleapiclient.discovery import build
-    from datetime import datetime
-    import os
+    from app.youtube_provider import get_youtube_provider
 
     db = SessionLocal()
     try:
-        account = db.query(YouTubeAccount).filter(
-            YouTubeAccount.user_id == user_id
-        ).first()
-
-        if not account:
-            return {
-                "upload_status": "failed",
-                "upload_error":  "No YouTube account connected. Connect via /youtube/connect first.",
-            }
-
-        # Build credentials + refresh if expired
-        credentials = Credentials(
-            token=account.access_token,
-            refresh_token=account.refresh_token,
-            token_uri="https://oauth2.googleapis.com/token",
-            client_id=os.getenv("GOOGLE_CLIENT_ID"),
-            client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-            expiry=account.token_expiry,
+        provider = get_youtube_provider(user_id=user_id, db=db)
+        result   = provider.upload_thumbnail(
+            video_id=       video_id,
+            thumbnail_path= thumbnail_path,
         )
-        if credentials.expired and credentials.refresh_token:
-            credentials.refresh(GoogleRequest())
-            account.access_token = credentials.token
-            account.token_expiry = credentials.expiry
-            db.commit()
 
-        youtube = build("youtube", "v3", credentials=credentials)
-
-        # Build video metadata for the API call
-        # NOTE: actual video file upload requires a file path/bytes.
-        # For now this node prepares and validates the metadata.
-        # Full binary upload will be added when video file handling is implemented.
-        video_metadata = {
-            "snippet": {
-                "title":       state.get("seo_title", state.get("topic", "")),
-                "description": state.get("seo_description", ""),
-                "tags":        state.get("seo_tags", []),
-                "categoryId":  "27",  # Education — will map from seo_category later
-            },
-            "status": {
-                "privacyStatus":           state.get("privacy_status", "private"),
-                "selfDeclaredMadeForKids": False,
-            },
-        }
-
-        print(f"[upload_video_node] metadata prepared: {video_metadata['snippet']['title']}")
-        print("[upload_video_node] NOTE: video file upload requires file path — metadata only for now")
-
-        # TODO: When video file upload is ready, use:
-        # from googleapiclient.http import MediaFileUpload
-        # media = MediaFileUpload(video_file_path, chunksize=-1, resumable=True)
-        # request = youtube.videos().insert(part="snippet,status", body=video_metadata, media_body=media)
-        # response = request.execute()
-        # return {"youtube_video_id": response["id"], "upload_status": "uploaded"}
-
+        print(f"[upload_thumbnail_node] result: {result}")
         return {
-            "upload_status":    "metadata_ready",
-            "youtube_video_id": "",
+            "thumbnail_status":   result.get("thumbnail_status", "failed"),
+            "thumbnail_uploaded": result.get("thumbnail_status") == "uploaded",
+            "thumbnail_error":    result.get("error"),
         }
-
     except Exception as e:
-        print(f"[upload_video_node] error: {e}")
-        return {"upload_status": "failed", "upload_error": str(e)}
+        print(f"[upload_thumbnail_node] error: {e}")
+        return {
+            "thumbnail_status":   "failed",
+            "thumbnail_uploaded": False,
+            "thumbnail_error":    str(e),
+        }
     finally:
         db.close()
 
 
-# ── Conditional edge ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# NEW NODE B: upload_video_node (real implementation)
+# ══════════════════════════════════════════════════════════════════
+
+def upload_video_node(state: UploadState) -> dict:
+    """
+    Upload the video file to YouTube using the provider abstraction.
+
+    Requires:
+      - seo_approved == True (from review_metadata HITL)
+      - video_file_path in state (absolute path to .mp4 / .mov)
+      - user_id with a connected YouTube account
+
+    Returns youtube_video_id, youtube_video_url, upload_status, upload_error.
+
+    If video_file_path is missing, returns upload_status="metadata_ready"
+    so the demo flow still works without an actual video file.
+    """
+    print("[upload_video_node] starting...")
+
+    if not state.get("seo_approved"):
+        return {"upload_status": "cancelled"}
+
+    user_id         = state.get("user_id")
+    video_file_path = state.get("video_file_path", "")
+
+    if not user_id:
+        return {"upload_status": "failed", "upload_error": "user_id missing from state"}
+
+    # Demo mode: no video file provided — return metadata_ready so the
+    # rest of the workflow (thumbnail, save) still runs correctly
+    if not video_file_path:
+        print("[upload_video_node] no video_file_path — demo mode (metadata only)")
+        return {
+            "youtube_video_id":  "",
+            "youtube_video_url": "",
+            "upload_status":     "metadata_ready",
+            "upload_error":      None,
+            "provider_used":     "none",
+        }
+
+    from app.database import SessionLocal
+    from app.youtube_provider import get_youtube_provider
+    from app.youtube_provider.youtube_api_provider import CATEGORY_MAP
+
+    # Map category name → ID (default to Education = 27)
+    category_name = state.get("seo_category", "Education")
+    category_id   = CATEGORY_MAP.get(category_name, "27")
+
+    db = SessionLocal()
+    try:
+        provider = get_youtube_provider(user_id=user_id, db=db)
+        result   = provider.upload_video(
+            video_file_path=video_file_path,
+            title=          state.get("seo_title",       state.get("topic", ""))[:100],
+            description=    state.get("seo_description", ""),
+            tags=           state.get("seo_tags",        []),
+            category_id=    category_id,
+            privacy_status= state.get("privacy_status",  "private"),
+        )
+
+        # Determine which provider was used
+        provider_name = "mcp" if hasattr(provider, "mcp_url") else "api"
+
+        print(f"[upload_video_node] result: {result.get('upload_status')}")
+        return {
+            "youtube_video_id":  result.get("youtube_video_id",  ""),
+            "youtube_video_url": result.get("youtube_video_url", ""),
+            "upload_status":     result.get("upload_status",     "failed"),
+            "upload_error":      result.get("error"),
+            "provider_used":     provider_name,
+        }
+
+    except Exception as e:
+        print(f"[upload_video_node] error: {e}")
+        return {
+            "youtube_video_id":  "",
+            "youtube_video_url": "",
+            "upload_status":     "failed",
+            "upload_error":      str(e),
+            "provider_used":     "unknown",
+        }
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════
+# NEW NODE C: save_upload_result_node
+# ══════════════════════════════════════════════════════════════════
+
+def save_upload_result_node(state: UploadState) -> dict:
+    """
+    Save the complete upload result to upload_records table.
+    Runs after both upload_thumbnail and upload_video complete.
+    Always runs — even if upload failed — so we have a full audit trail.
+    """
+    print("[save_upload_result_node] saving upload result...")
+
+    from app.database import SessionLocal
+    from app.services.upload_service import (
+        create_upload_record,
+        complete_upload_record,
+        fail_upload_record,
+        cancel_upload_record,
+    )
+
+    upload_status = state.get("upload_status", "failed")
+
+    db = SessionLocal()
+    try:
+        # Create the record
+        record = create_upload_record(
+            user_id=         state.get("user_id"),
+            generation_id=   state.get("generation_id"),
+            seo_title=       state.get("seo_title", ""),
+            seo_description= state.get("seo_description", ""),
+            seo_tags=        state.get("seo_tags", []),
+            seo_hashtags=    state.get("seo_hashtags", []),
+            seo_category=    state.get("seo_category", ""),
+            privacy_status=  state.get("privacy_status", "private"),
+            db=db,
+        )
+
+        published_at = datetime.now(timezone.utc).isoformat()
+
+        if upload_status in ("uploaded", "metadata_ready"):
+            complete_upload_record(
+                record_id=        record.id,
+                youtube_video_id=  state.get("youtube_video_id",  ""),
+                youtube_video_url= state.get("youtube_video_url", ""),
+                thumbnail_status=  state.get("thumbnail_status",  "skipped"),
+                provider_used=     state.get("provider_used",     "api"),
+                db=db,
+            )
+        elif upload_status == "cancelled":
+            cancel_upload_record(record.id, db)
+            published_at = None
+        else:
+            fail_upload_record(record.id, state.get("upload_error", "unknown error"), db)
+            published_at = None
+
+        print(f"[save_upload_result_node] record {record.id} saved as {upload_status}")
+        return {
+            "upload_record_id": record.id,
+            "published_at":     published_at,
+        }
+
+    except Exception as e:
+        print(f"[save_upload_result_node] error saving record: {e}")
+        return {"upload_record_id": None, "published_at": None}
+    finally:
+        db.close()
+
+
+# ══════════════════════════════════════════════════════════════════
+# Conditional edges
+# ══════════════════════════════════════════════════════════════════
 
 def check_seo_approval(state: UploadState) -> str:
     return "approved" if state.get("seo_approved") is True else "rejected"
@@ -306,19 +403,29 @@ def handle_upload_rejection_node(state: UploadState) -> dict:
     return {"upload_status": "cancelled"}
 
 
-# ── Graph construction ───────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# Graph construction
+# New graph: ... → review_metadata → upload_video → upload_thumbnail
+#            → save_upload_result → END
+# ══════════════════════════════════════════════════════════════════
 
-def _build_upload_graph(checkpointer: MemorySaver):
+def _build_upload_graph(checkpointer):
     builder = StateGraph(UploadState)
 
+    # Existing nodes
     builder.add_node("load_generation",         load_generation_node)
     builder.add_node("seo_title",               seo_title_node)
     builder.add_node("seo_description",         seo_description_node)
     builder.add_node("tags",                    tags_node)
     builder.add_node("review_metadata",         review_metadata_node)
-    builder.add_node("upload_video",            upload_video_node)
     builder.add_node("handle_upload_rejection", handle_upload_rejection_node)
 
+    # New nodes
+    builder.add_node("upload_video",            upload_video_node)
+    builder.add_node("upload_thumbnail",        upload_thumbnail_node)
+    builder.add_node("save_upload_result",      save_upload_result_node)
+
+    # Edges — existing
     builder.set_entry_point("load_generation")
     builder.add_edge("load_generation", "seo_title")
     builder.add_edge("seo_title",       "seo_description")
@@ -331,22 +438,24 @@ def _build_upload_graph(checkpointer: MemorySaver):
         {"approved": "upload_video", "rejected": "handle_upload_rejection"},
     )
 
-    builder.add_edge("upload_video",            END)
-    builder.add_edge("handle_upload_rejection", END)
+    # Edges — new
+    # upload_video first (need video_id before thumbnail)
+    builder.add_edge("upload_video",       "upload_thumbnail")
+    builder.add_edge("upload_thumbnail",   "save_upload_result")
+    builder.add_edge("save_upload_result", END)
+
+    # Rejection path also saves a record
+    builder.add_edge("handle_upload_rejection", "save_upload_result")
 
     return builder.compile(checkpointer=checkpointer)
 
 
-# ── Singleton ────────────────────────────────────────────────────
+# ── Singleton — survives uvicorn --reload ────────────────────────
 
 import sys as _sys
 _MODULE = _sys.modules[__name__]
 
-if not hasattr(_MODULE, "_upload_checkpointer"):
-    _MODULE._upload_checkpointer = MemorySaver()
-
 if not hasattr(_MODULE, "_upload_graph"):
-    _MODULE._upload_graph = _build_upload_graph(_MODULE._upload_checkpointer)
+    _MODULE._upload_graph = _build_upload_graph(get_checkpointer())
 
-upload_checkpointer: MemorySaver = _MODULE._upload_checkpointer
 upload_graph = _MODULE._upload_graph

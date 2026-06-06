@@ -18,6 +18,10 @@ from app.services.generation_service import (
     get_generation_by_id,
     get_generation_by_workflow_thread,
 )
+from app.services.upload_service import (
+    get_user_uploads,
+    get_upload_by_id,
+)
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
 
@@ -40,6 +44,11 @@ class UploadStartRequest(BaseModel):
     generation_id: int
     privacy_status: str = "private"   # private | unlisted | public
     plan: Plan = Plan.normal
+    # Optional: absolute path to video file on server
+    # If omitted, workflow runs in demo mode (metadata only, no actual upload)
+    video_file_path: Optional[str] = None
+    # Optional: absolute path to thumbnail image file (.jpg/.png, max 2MB)
+    thumbnail_file_path: Optional[str] = None
 
 class UploadReviewRequest(BaseModel):
     thread_id: str
@@ -295,19 +304,29 @@ def start_upload_workflow(
     """
     Start the upload/publishing workflow for a completed generation.
     Generates SEO title, description, tags, then pauses for user review.
+
+    Optional fields:
+      video_file_path     — absolute server path to .mp4/.mov for real upload
+      thumbnail_file_path — absolute server path to .jpg/.png for thumbnail
+
+    If video_file_path is omitted, the workflow runs in demo mode:
+    all SEO and metadata is generated, but no video is actually uploaded.
     """
     thread_id = str(uuid.uuid4())
     config    = {"configurable": {"thread_id": thread_id}}
 
-    result = upload_graph.invoke(
-        {
-            "generation_id":  data.generation_id,
-            "user_id":        current_user.id,
-            "plan":           data.plan.value,
-            "privacy_status": data.privacy_status,
-        },
-        config=config,
-    )
+    initial_state = {
+        "generation_id":      data.generation_id,
+        "user_id":            current_user.id,
+        "plan":               data.plan.value,
+        "privacy_status":     data.privacy_status,
+    }
+    if data.video_file_path:
+        initial_state["video_file_path"] = data.video_file_path
+    if data.thumbnail_file_path:
+        initial_state["thumbnail_file_path"] = data.thumbnail_file_path
+
+    result = upload_graph.invoke(initial_state, config=config)
 
     state  = upload_graph.get_state(config)
     paused = _paused_at(state)
@@ -372,10 +391,94 @@ def review_upload_metadata(data: UploadReviewRequest):
             "message":   "Upload cancelled by user.",
         }
 
+    # Full demo-ready response matching G requirement
     return {
         "thread_id":        data.thread_id,
-        "status":           result.get("upload_status", "unknown"),
+        "upload_status":    result.get("upload_status",    "unknown"),
         "youtube_video_id": result.get("youtube_video_id", ""),
-        "upload_error":     result.get("upload_error", ""),
-        "seo_title":        result.get("seo_title", ""),
+        "youtube_video_url":result.get("youtube_video_url",""),
+        "thumbnail_status": result.get("thumbnail_status", "skipped"),
+        "published_at":     result.get("published_at",     None),
+        "upload_record_id": result.get("upload_record_id", None),
+        "seo_title":        result.get("seo_title",        ""),
+        "upload_error":     result.get("upload_error",     None),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# UPLOAD HISTORY
+# ══════════════════════════════════════════════════════════════
+
+@router.get("/uploads")
+def get_upload_history(
+    limit: int = 20,
+    offset: int = 0,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all past YouTube uploads for the current user, newest first.
+    Use this to build a 'Published Videos' history page in the frontend.
+    """
+    uploads = get_user_uploads(
+        user_id=current_user.id,
+        db=db,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "total":   len(uploads),
+        "offset":  offset,
+        "limit":   limit,
+        "results": [
+            {
+                "id":                u.id,
+                "generation_id":     u.generation_id,
+                "youtube_video_id":  u.youtube_video_id,
+                "youtube_video_url": u.youtube_video_url,
+                "upload_status":     u.upload_status,
+                "thumbnail_status":  u.thumbnail_status,
+                "seo_title":         u.seo_title,
+                "privacy_status":    u.privacy_status,
+                "provider_used":     u.provider_used,
+                "published_at":      u.published_at,
+                "created_at":        u.created_at,
+            }
+            for u in uploads
+        ],
+    }
+
+
+@router.get("/uploads/{record_id}")
+def get_upload_detail(
+    record_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the full upload record including all SEO metadata used at publish time.
+    """
+    record = get_upload_by_id(record_id, current_user.id, db)
+    if not record:
+        raise HTTPException(status_code=404, detail="Upload record not found.")
+
+    return {
+        "id":                record.id,
+        "generation_id":     record.generation_id,
+        "youtube_video_id":  record.youtube_video_id,
+        "youtube_video_url": record.youtube_video_url,
+        "upload_status":     record.upload_status,
+        "upload_error":      record.upload_error,
+        "thumbnail_status":  record.thumbnail_status,
+        "thumbnail_error":   record.thumbnail_error,
+        "seo_title":         record.seo_title,
+        "seo_description":   record.seo_description,
+        "seo_tags":          record.seo_tags,
+        "seo_hashtags":      record.seo_hashtags,
+        "seo_category":      record.seo_category,
+        "privacy_status":    record.privacy_status,
+        "provider_used":     record.provider_used,
+        "published_at":      record.published_at,
+        "created_at":        record.created_at,
+        "updated_at":        record.updated_at,
     }
