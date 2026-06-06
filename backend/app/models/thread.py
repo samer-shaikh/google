@@ -18,18 +18,9 @@ class Thread(Base):
         nullable=False
     )
 
-    created_at = Column(
-        DateTime,
-        default=datetime.utcnow
-    )
+    created_at = Column(DateTime, default=datetime.utcnow)
 
-    user = relationship(
-        "User",
-        back_populates="threads"
-    )
+    user = relationship("User", back_populates="threads")
 
-    generations = relationship(
-        "Generation",
-        back_populates="thread",
-        cascade="all, delete"
-    )
+    # generations relationship removed — Generation now links
+    # directly to users via user_id, not through threads

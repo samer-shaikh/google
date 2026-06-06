@@ -33,6 +33,9 @@ with engine.connect() as conn:
     print("Dropping youtube_accounts...")
     conn.execute(text("DROP TABLE IF EXISTS youtube_accounts CASCADE"))
 
+    print("Dropping generations...")
+    conn.execute(text("DROP TABLE IF EXISTS generations CASCADE"))
+
     conn.commit()
     print("Tables dropped.")
 

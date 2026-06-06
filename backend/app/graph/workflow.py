@@ -12,18 +12,10 @@ from app.agents.seo_agent import seo_agent
 
 
 # ── Profile loader ───────────────────────────────────────────────
-# Loads the creator profile once at the start of the workflow
-# and stores it in state so every agent can use it.
 
 def load_profile_node(state: AgentState) -> dict:
-    """
-    Load the creator profile from DB for this user.
-    If no profile exists, workflow continues with empty profile
-    (agents fall back to generic output).
-    """
     user_id = state.get("user_id")
     if not user_id:
-        print("[load_profile_node] no user_id in state — skipping profile load")
         return {"creator_profile": {}}
 
     from app.database import SessionLocal
@@ -37,22 +29,21 @@ def load_profile_node(state: AgentState) -> dict:
             .first()
         )
         if not profile:
-            print(f"[load_profile_node] no profile found for user {user_id}")
+            print(f"[load_profile_node] no profile for user {user_id}")
             return {"creator_profile": {}}
 
-        # Flatten profile into a dict all agents understand
         profile_dict = {
-            "creator_niche":            ", ".join(profile.topics or []),
-            "main_topics":              profile.topics or [],
-            "topics":                   profile.topics or [],
-            "audience":                 profile.audience or {},
-            "audience_type":            (profile.audience or {}).get("audience_type", ""),
-            "audience_level":           (profile.audience or {}).get("audience_level", "beginner"),
-            "title_style":              profile.title_style or {},
-            "description_style":        profile.description_style or {},
-            "content_strengths":        [],
-            "viral_patterns":           [],
-            "channel_name":             profile.channel_name,
+            "creator_niche":    ", ".join(profile.topics or []),
+            "main_topics":      profile.topics or [],
+            "topics":           profile.topics or [],
+            "audience":         profile.audience or {},
+            "audience_type":    (profile.audience or {}).get("audience_type", ""),
+            "audience_level":   (profile.audience or {}).get("audience_level", "beginner"),
+            "title_style":      profile.title_style or {},
+            "description_style":profile.description_style or {},
+            "content_strengths":[],
+            "viral_patterns":   [],
+            "channel_name":     profile.channel_name,
         }
         print(f"[load_profile_node] loaded profile for '{profile.channel_name}'")
         return {"creator_profile": profile_dict}
@@ -60,9 +51,9 @@ def load_profile_node(state: AgentState) -> dict:
         db.close()
 
 
-# ── Nodes ────────────────────────────────────────────────────────
+# ── Research ─────────────────────────────────────────────────────
 
-def research_node(state: AgentState):
+def research_node(state: AgentState) -> dict:
     print("[research_node] starting...")
     result = research_agent(
         state["topic"],
@@ -70,17 +61,34 @@ def research_node(state: AgentState):
         state.get("creator_profile", {}),
     )
     print("[research_node] done.")
+
+    # Save research to DB immediately — if the user rejects later,
+    # we still have a record of the research that was done
+    generation_id = state.get("generation_id")
+    if generation_id:
+        from app.database import SessionLocal
+        from app.services.generation_service import save_research
+        db = SessionLocal()
+        try:
+            save_research(generation_id, result, db)
+        finally:
+            db.close()
+
     return {"research": result}
 
 
-def human_approval_node(state: AgentState):
-    print("[human_approval_node] pausing — waiting for human review...")
+# ── HITL #1 — Research approval ──────────────────────────────────
+
+def human_approval_node(state: AgentState) -> dict:
+    print("[human_approval_node] pausing...")
     approved = interrupt("Research complete. Approve to continue.")
     print(f"[human_approval_node] resumed — approved={approved}")
     return {"human_approved": approved}
 
 
-def idea_node(state: AgentState):
+# ── Ideas ────────────────────────────────────────────────────────
+
+def idea_node(state: AgentState) -> dict:
     print("[idea_node] starting...")
     result = video_idea_agent(
         state["topic"],
@@ -92,15 +100,19 @@ def idea_node(state: AgentState):
     return {"ideas": result}
 
 
-def idea_selection_node(state: AgentState):
+# ── HITL #2 — Idea selection ─────────────────────────────────────
+
+def idea_selection_node(state: AgentState) -> dict:
     selected = interrupt({
-        "type": "idea_selection",
-        "ideas": state["ideas"]
+        "type":  "idea_selection",
+        "ideas": state["ideas"],
     })
     return {"selected_idea": selected}
 
 
-def script_node(state: AgentState):
+# ── Script ───────────────────────────────────────────────────────
+
+def script_node(state: AgentState) -> dict:
     print("[script_node] starting...")
     result = script_agent(
         state["topic"],
@@ -113,7 +125,9 @@ def script_node(state: AgentState):
     return {"script": result}
 
 
-def thumbnail_node(state: AgentState):
+# ── Thumbnail ────────────────────────────────────────────────────
+
+def thumbnail_node(state: AgentState) -> dict:
     print("[thumbnail_node] starting...")
     result = thumbnail_agent(
         state["topic"],
@@ -125,7 +139,9 @@ def thumbnail_node(state: AgentState):
     return {"thumbnail": result}
 
 
-def seo_node(state: AgentState):
+# ── SEO ──────────────────────────────────────────────────────────
+
+def seo_node(state: AgentState) -> dict:
     print("[seo_node] starting...")
     result = seo_agent(
         state["topic"],
@@ -137,12 +153,66 @@ def seo_node(state: AgentState):
     return {"seo": result}
 
 
+# ── Save generation ───────────────────────────────────────────────
+
+def save_generation_node(state: AgentState) -> dict:
+    """
+    Final node — saves the complete workflow output to the
+    generations table. Runs after SEO, before END.
+    """
+    generation_id = state.get("generation_id")
+    if not generation_id:
+        print("[save_generation_node] no generation_id in state — skipping save")
+        return {}
+
+    from app.database import SessionLocal
+    from app.services.generation_service import complete_generation, fail_generation
+
+    db = SessionLocal()
+    try:
+        complete_generation(
+            generation_id=generation_id,
+            ideas=state.get("ideas", []),
+            selected_idea=state.get("selected_idea", ""),
+            script=state.get("script", ""),
+            thumbnail=state.get("thumbnail", ""),
+            seo=state.get("seo", ""),
+            creator_profile_snapshot=state.get("creator_profile", {}),
+            db=db,
+        )
+        print(f"[save_generation_node] generation {generation_id} saved as completed")
+    except Exception as e:
+        print(f"[save_generation_node] error saving generation: {e}")
+        try:
+            fail_generation(generation_id, str(e), db)
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+    return {}
+
+
 # ── Conditional edge ─────────────────────────────────────────────
 
-def check_approval(state: AgentState):
+def check_approval(state: AgentState) -> str:
     if state.get("human_approved") is True:
         return "approved"
     return "rejected"
+
+
+def handle_rejection_node(state: AgentState) -> dict:
+    """Mark generation as failed when user rejects research."""
+    generation_id = state.get("generation_id")
+    if generation_id:
+        from app.database import SessionLocal
+        from app.services.generation_service import fail_generation
+        db = SessionLocal()
+        try:
+            fail_generation(generation_id, "Rejected by user at research stage", db)
+        finally:
+            db.close()
+    return {}
 
 
 # ── Graph construction ───────────────────────────────────────────
@@ -150,14 +220,16 @@ def check_approval(state: AgentState):
 def _build_graph(checkpointer: MemorySaver):
     builder = StateGraph(AgentState)
 
-    builder.add_node("load_profile",   load_profile_node)
-    builder.add_node("research",       research_node)
-    builder.add_node("human_approval", human_approval_node)
-    builder.add_node("ideas",          idea_node)
-    builder.add_node("idea_selection", idea_selection_node)
-    builder.add_node("script",         script_node)
-    builder.add_node("thumbnail",      thumbnail_node)
-    builder.add_node("seo",            seo_node)
+    builder.add_node("load_profile",    load_profile_node)
+    builder.add_node("research",        research_node)
+    builder.add_node("human_approval",  human_approval_node)
+    builder.add_node("ideas",           idea_node)
+    builder.add_node("idea_selection",  idea_selection_node)
+    builder.add_node("script",          script_node)
+    builder.add_node("thumbnail",       thumbnail_node)
+    builder.add_node("seo",             seo_node)
+    builder.add_node("save_generation", save_generation_node)
+    builder.add_node("handle_rejection",handle_rejection_node)
 
     builder.set_entry_point("load_profile")
     builder.add_edge("load_profile",   "research")
@@ -166,22 +238,23 @@ def _build_graph(checkpointer: MemorySaver):
     builder.add_conditional_edges(
         "human_approval",
         check_approval,
-        {"approved": "ideas", "rejected": END}
+        {"approved": "ideas", "rejected": "handle_rejection"}
     )
 
-    builder.add_edge("ideas",          "idea_selection")
-    builder.add_edge("idea_selection", "script")
-    builder.add_edge("script",         "thumbnail")
-    builder.add_edge("thumbnail",      "seo")
-    builder.add_edge("seo",            END)
+    builder.add_edge("handle_rejection", END)
+    builder.add_edge("ideas",            "idea_selection")
+    builder.add_edge("idea_selection",   "script")
+    builder.add_edge("script",           "thumbnail")
+    builder.add_edge("thumbnail",        "seo")
+    builder.add_edge("seo",              "save_generation")
+    builder.add_edge("save_generation",  END)
 
     return builder.compile(checkpointer=checkpointer)
 
 
-# ── Singleton guard — survives uvicorn --reload ──────────────────
+# ── Singleton — survives uvicorn --reload ────────────────────────
 
 import sys as _sys
-
 _MODULE = _sys.modules[__name__]
 
 if not hasattr(_MODULE, "_checkpointer"):

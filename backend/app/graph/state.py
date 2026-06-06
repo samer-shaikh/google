@@ -6,9 +6,12 @@ class AgentState(TypedDict, total=False):
     plan: str
 
     # Creator profile loaded from DB at workflow start
-    # All agents use this to personalize their output
     user_id: int
-    creator_profile: dict   # full profile dict from creator_profiles table
+    creator_profile: dict
+
+    # Generation history — ID created at workflow start,
+    # updated at each stage, completed at the end
+    generation_id: int
 
     # pipeline outputs
     research: str
