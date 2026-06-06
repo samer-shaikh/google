@@ -1,3 +1,13 @@
+"""
+workflow.py — Content Generation Pipeline
+
+Graph: load_profile → research → human_approval → ideas →
+       idea_selection → script → thumbnail → save_generation → END
+
+SEO is intentionally NOT in this graph.
+It belongs in the Upload Workflow (upload_workflow.py) which runs
+separately when the user is ready to publish to YouTube.
+"""
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import interrupt
@@ -8,7 +18,6 @@ from app.agents.research_agent import research_agent
 from app.agents.video_idea_agent import video_idea_agent
 from app.agents.script_agent import script_agent
 from app.agents.thumbnail_agent import thumbnail_agent
-from app.agents.seo_agent import seo_agent
 
 
 # ── Profile loader ───────────────────────────────────────────────
@@ -33,17 +42,17 @@ def load_profile_node(state: AgentState) -> dict:
             return {"creator_profile": {}}
 
         profile_dict = {
-            "creator_niche":    ", ".join(profile.topics or []),
-            "main_topics":      profile.topics or [],
-            "topics":           profile.topics or [],
-            "audience":         profile.audience or {},
-            "audience_type":    (profile.audience or {}).get("audience_type", ""),
-            "audience_level":   (profile.audience or {}).get("audience_level", "beginner"),
-            "title_style":      profile.title_style or {},
-            "description_style":profile.description_style or {},
-            "content_strengths":[],
-            "viral_patterns":   [],
-            "channel_name":     profile.channel_name,
+            "creator_niche":     ", ".join(profile.topics or []),
+            "main_topics":       profile.topics or [],
+            "topics":            profile.topics or [],
+            "audience":          profile.audience or {},
+            "audience_type":     (profile.audience or {}).get("audience_type", ""),
+            "audience_level":    (profile.audience or {}).get("audience_level", "beginner"),
+            "title_style":       profile.title_style or {},
+            "description_style": profile.description_style or {},
+            "content_strengths": [],
+            "viral_patterns":    [],
+            "channel_name":      profile.channel_name,
         }
         print(f"[load_profile_node] loaded profile for '{profile.channel_name}'")
         return {"creator_profile": profile_dict}
@@ -62,8 +71,7 @@ def research_node(state: AgentState) -> dict:
     )
     print("[research_node] done.")
 
-    # Save research to DB immediately — if the user rejects later,
-    # we still have a record of the research that was done
+    # Persist research immediately — survives user rejection
     generation_id = state.get("generation_id")
     if generation_id:
         from app.database import SessionLocal
@@ -139,30 +147,13 @@ def thumbnail_node(state: AgentState) -> dict:
     return {"thumbnail": result}
 
 
-# ── SEO ──────────────────────────────────────────────────────────
-
-def seo_node(state: AgentState) -> dict:
-    print("[seo_node] starting...")
-    result = seo_agent(
-        state["topic"],
-        state.get("script", ""),
-        state.get("plan", "normal"),
-        state.get("creator_profile", {}),
-    )
-    print("[seo_node] done.")
-    return {"seo": result}
-
-
 # ── Save generation ───────────────────────────────────────────────
+# SEO is intentionally absent — it will be generated in the Upload Workflow.
 
 def save_generation_node(state: AgentState) -> dict:
-    """
-    Final node — saves the complete workflow output to the
-    generations table. Runs after SEO, before END.
-    """
     generation_id = state.get("generation_id")
     if not generation_id:
-        print("[save_generation_node] no generation_id in state — skipping save")
+        print("[save_generation_node] no generation_id — skipping")
         return {}
 
     from app.database import SessionLocal
@@ -176,13 +167,13 @@ def save_generation_node(state: AgentState) -> dict:
             selected_idea=state.get("selected_idea", ""),
             script=state.get("script", ""),
             thumbnail=state.get("thumbnail", ""),
-            seo=state.get("seo", ""),
+            seo="",                                # always empty — SEO is upload workflow's job
             creator_profile_snapshot=state.get("creator_profile", {}),
             db=db,
         )
         print(f"[save_generation_node] generation {generation_id} saved as completed")
     except Exception as e:
-        print(f"[save_generation_node] error saving generation: {e}")
+        print(f"[save_generation_node] error: {e}")
         try:
             fail_generation(generation_id, str(e), db)
         except Exception:
@@ -196,13 +187,10 @@ def save_generation_node(state: AgentState) -> dict:
 # ── Conditional edge ─────────────────────────────────────────────
 
 def check_approval(state: AgentState) -> str:
-    if state.get("human_approved") is True:
-        return "approved"
-    return "rejected"
+    return "approved" if state.get("human_approved") is True else "rejected"
 
 
 def handle_rejection_node(state: AgentState) -> dict:
-    """Mark generation as failed when user rejects research."""
     generation_id = state.get("generation_id")
     if generation_id:
         from app.database import SessionLocal
@@ -220,33 +208,31 @@ def handle_rejection_node(state: AgentState) -> dict:
 def _build_graph(checkpointer: MemorySaver):
     builder = StateGraph(AgentState)
 
-    builder.add_node("load_profile",    load_profile_node)
-    builder.add_node("research",        research_node)
-    builder.add_node("human_approval",  human_approval_node)
-    builder.add_node("ideas",           idea_node)
-    builder.add_node("idea_selection",  idea_selection_node)
-    builder.add_node("script",          script_node)
-    builder.add_node("thumbnail",       thumbnail_node)
-    builder.add_node("seo",             seo_node)
-    builder.add_node("save_generation", save_generation_node)
-    builder.add_node("handle_rejection",handle_rejection_node)
+    builder.add_node("load_profile",     load_profile_node)
+    builder.add_node("research",         research_node)
+    builder.add_node("human_approval",   human_approval_node)
+    builder.add_node("ideas",            idea_node)
+    builder.add_node("idea_selection",   idea_selection_node)
+    builder.add_node("script",           script_node)
+    builder.add_node("thumbnail",        thumbnail_node)
+    builder.add_node("save_generation",  save_generation_node)
+    builder.add_node("handle_rejection", handle_rejection_node)
 
     builder.set_entry_point("load_profile")
-    builder.add_edge("load_profile",   "research")
-    builder.add_edge("research",       "human_approval")
+    builder.add_edge("load_profile",     "research")
+    builder.add_edge("research",         "human_approval")
 
     builder.add_conditional_edges(
         "human_approval",
         check_approval,
-        {"approved": "ideas", "rejected": "handle_rejection"}
+        {"approved": "ideas", "rejected": "handle_rejection"},
     )
 
     builder.add_edge("handle_rejection", END)
     builder.add_edge("ideas",            "idea_selection")
     builder.add_edge("idea_selection",   "script")
     builder.add_edge("script",           "thumbnail")
-    builder.add_edge("thumbnail",        "seo")
-    builder.add_edge("seo",              "save_generation")
+    builder.add_edge("thumbnail",        "save_generation")  # thumbnail → save (no seo)
     builder.add_edge("save_generation",  END)
 
     return builder.compile(checkpointer=checkpointer)

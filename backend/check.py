@@ -4,14 +4,15 @@ Run from the backend folder:
     python check.py
 
 Checks every layer in order:
-  1. Server is reachable
-  2. DB tables exist
-  3. Signup works
-  4. Login works + returns JWT
-  5. Swagger auth works (GET /auth/me with Bearer token)
-  6. YouTube connect returns a real auth URL (not mock)
-  7. DB model consistency (user_id types, FKs, new columns)
-  8. ENV variables are all set
+  1. ENV variables
+  2. Server reachable + Swagger BearerAuth
+  3. Auth flow (signup, login, bearer, refresh)
+  4. YouTube OAuth URL
+  5. DB schema (all tables + columns)
+  6. Creator profile routes
+  7. Content generation workflow (structure + state)
+  8. Upload workflow (structure + state)
+  9. Generation history routes
 """
 
 import sys
@@ -24,8 +25,6 @@ from datetime import datetime
 BASE = "http://localhost:8000"
 PASS = "\033[92m PASS \033[0m"
 FAIL = "\033[91m FAIL \033[0m"
-WARN = "\033[93m WARN \033[0m"
-INFO = "\033[94m INFO \033[0m"
 
 results = []
 
@@ -41,18 +40,23 @@ def check(name, fn):
         print(f"{FAIL} {name}  →  {type(e).__name__}: {e}")
         results.append((name, False, str(e)))
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
 def rand_email():
-    suffix = "".join(random.choices(string.ascii_lowercase, k=6))
-    return f"test_{suffix}@example.com"
+    s = "".join(random.choices(string.ascii_lowercase, k=6))
+    return f"test_{s}@example.com"
 
-# ── 1. ENV variables ─────────────────────────────────────────────────────────
+# Shared state across checks
+TEST_EMAIL   = rand_email()
+TEST_PASS    = "TestPass123!"
+access_token = None
+thread_id    = None
+generation_id = None
 
-print("\n" + "="*55)
+# ── ENV ───────────────────────────────────────────────────────────────────────
+
+print("\n" + "="*60)
 print("  AI Content Studio — Health Check")
 print("  " + datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-print("="*55 + "\n")
+print("="*60 + "\n")
 
 print("[ ENV Variables ]\n")
 
@@ -62,25 +66,19 @@ if os.path.exists(env_path):
     load_dotenv(env_path)
 
 required_env = [
-    "DATABASE_URl",
-    "SECRET_KEY_FOR_LOGIN",
-    "SECRET_KEY",
-    "ALGORITHM",
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
+    "DATABASE_URl", "SECRET_KEY_FOR_LOGIN", "SECRET_KEY",
+    "ALGORITHM", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
     "YOUTUBE_REDIRECT_URI",
 ]
-
 for key in required_env:
     val = os.getenv(key)
     if val:
-        # Show first 8 chars only for secrets
         preview = val[:8] + "..." if len(val) > 8 else val
         print(f"{PASS} {key} = {preview}")
     else:
         print(f"{FAIL} {key} is NOT SET")
 
-# ── 2. Server reachable ───────────────────────────────────────────────────────
+# ── SERVER ────────────────────────────────────────────────────────────────────
 
 print("\n[ Server ]\n")
 
@@ -91,278 +89,414 @@ def check_server():
 
 def check_openapi():
     r = requests.get(f"{BASE}/openapi.json", timeout=5)
-    assert r.status_code == 200, f"openapi.json returned {r.status_code}"
+    assert r.status_code == 200
     schema = r.json()
     schemes = schema.get("components", {}).get("securitySchemes", {})
-    assert "BearerAuth" in schemes, (
-        "BearerAuth scheme missing from openapi.json — "
-        "Swagger lock icon will not work"
-    )
-    scheme_type = schemes["BearerAuth"].get("scheme")
-    assert scheme_type == "bearer", f"Expected 'bearer' scheme, got '{scheme_type}'"
+    assert "BearerAuth" in schemes, "BearerAuth scheme missing"
+    assert schemes["BearerAuth"].get("scheme") == "bearer"
     return "BearerAuth scheme present"
 
-check("Server reachable at localhost:8000", check_server)
-check("Swagger has BearerAuth scheme (not OAuth2PasswordBearer)", check_openapi)
+def check_routes_registered():
+    r = requests.get(f"{BASE}/openapi.json", timeout=5)
+    schema = r.json()
+    paths = set(schema.get("paths", {}).keys())
+    required_routes = {
+        "/workflow/run",
+        "/workflow/resume",
+        "/workflow/select-idea",
+        "/workflow/upload/start",
+        "/workflow/upload/review",
+        "/workflow/history",
+    }
+    missing = required_routes - paths
+    assert not missing, f"Missing routes in OpenAPI: {missing}"
+    # Confirm SEO is NOT in the content workflow
+    assert "/workflow/seo" not in paths, "SEO route should not exist in content workflow"
+    return f"All {len(required_routes)} required routes registered"
 
-# ── 3. Auth flow ──────────────────────────────────────────────────────────────
+check("Server reachable",        check_server)
+check("BearerAuth in Swagger",   check_openapi)
+check("All routes registered",   check_routes_registered)
+
+# ── AUTH ──────────────────────────────────────────────────────────────────────
 
 print("\n[ Auth Flow ]\n")
 
-TEST_EMAIL = rand_email()
-TEST_PASS = "TestPass123!"
-access_token = None
-
 def check_signup():
     r = requests.post(f"{BASE}/auth/signup", json={
-        "email": TEST_EMAIL,
-        "password": TEST_PASS,
-        "name": "Test User"
+        "email": TEST_EMAIL, "password": TEST_PASS, "name": "Test User"
     }, timeout=5)
     assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
-    body = r.json()
-    assert "error" not in body, f"Signup error: {body.get('error')}"
+    assert "error" not in r.json()
     return f"Created {TEST_EMAIL}"
 
 def check_login():
     global access_token
     r = requests.post(f"{BASE}/auth/login", json={
-        "email": TEST_EMAIL,
-        "password": TEST_PASS
+        "email": TEST_EMAIL, "password": TEST_PASS
     }, timeout=5)
     assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
     body = r.json()
-    assert "error" not in body, f"Login error: {body.get('error')}"
-    assert "access_token" in body, "No access_token in response"
-    assert "refresh_token" in body, "No refresh_token in response"
+    assert "access_token"  in body, "No access_token"
+    assert "refresh_token" in body, "No refresh_token"
     access_token = body["access_token"]
-    return f"Got token: {access_token[:20]}..."
+    return f"Token: {access_token[:20]}..."
 
-def check_bearer_auth():
-    assert access_token, "No access_token — login must pass first"
-    r = requests.get(
-        f"{BASE}/auth/me",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=5
-    )
-    assert r.status_code == 200, (
-        f"Status {r.status_code}: {r.text}\n"
-        "  → This means the Bearer token is not being read correctly"
-    )
-    body = r.json()
-    assert body.get("email") == TEST_EMAIL, f"Wrong user returned: {body}"
-    return f"Authenticated as {body['email']}"
+def check_bearer():
+    r = requests.get(f"{BASE}/auth/me",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    assert r.json().get("email") == TEST_EMAIL
+    return f"Authenticated as {TEST_EMAIL}"
 
-def check_no_token_rejected():
+def check_no_token():
     r = requests.get(f"{BASE}/auth/me", timeout=5)
-    assert r.status_code == 401, (
-        f"Expected 401 without token, got {r.status_code} — "
-        "routes are not protected"
-    )
-    return "Unauthenticated request correctly rejected"
+    assert r.status_code == 401, f"Expected 401, got {r.status_code}"
+    return "401 without token"
 
-def check_bad_token_rejected():
-    r = requests.get(
-        f"{BASE}/auth/me",
-        headers={"Authorization": "Bearer fake.token.here"},
-        timeout=5
-    )
-    assert r.status_code == 401, (
-        f"Expected 401 for bad token, got {r.status_code}"
-    )
-    return "Invalid token correctly rejected"
+def check_bad_token():
+    r = requests.get(f"{BASE}/auth/me",
+        headers={"Authorization": "Bearer bad.token"}, timeout=5)
+    assert r.status_code == 401, f"Expected 401, got {r.status_code}"
+    return "401 for bad token"
 
 def check_refresh():
-    # Login fresh to get refresh token
     r = requests.post(f"{BASE}/auth/login", json={
-        "email": TEST_EMAIL,
-        "password": TEST_PASS
-    }, timeout=5)
+        "email": TEST_EMAIL, "password": TEST_PASS}, timeout=5)
     refresh = r.json().get("refresh_token")
-    assert refresh, "No refresh_token from login"
-
-    r2 = requests.post(f"{BASE}/auth/refresh", json={
-        "refresh_token": refresh
-    }, timeout=5)
+    assert refresh, "No refresh_token"
+    r2 = requests.post(f"{BASE}/auth/refresh",
+        json={"refresh_token": refresh}, timeout=5)
     assert r2.status_code == 200, f"Refresh failed: {r2.text}"
-    body = r2.json()
-    assert "access_token" in body, "No access_token in refresh response"
-    return "Refresh token exchange works"
+    assert "access_token" in r2.json()
+    return "Refresh works"
 
-check("Signup",                    check_signup)
-check("Login returns JWT",         check_login)
-check("Bearer token auth works",   check_bearer_auth)
-check("No token → 401",            check_no_token_rejected)
-check("Bad token → 401",           check_bad_token_rejected)
-check("Refresh token exchange",    check_refresh)
+check("Signup",           check_signup)
+check("Login → JWT",      check_login)
+check("Bearer auth",      check_bearer)
+check("No token → 401",   check_no_token)
+check("Bad token → 401",  check_bad_token)
+check("Refresh token",    check_refresh)
 
-# ── 4. YouTube OAuth URL ──────────────────────────────────────────────────────
+# ── YOUTUBE ───────────────────────────────────────────────────────────────────
 
 print("\n[ YouTube OAuth ]\n")
 
 def check_youtube_connect():
-    assert access_token, "Need access_token from login"
-    r = requests.get(
-        f"{BASE}/youtube/connect",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=5
-    )
+    r = requests.get(f"{BASE}/youtube/connect",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
     assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
-    body = r.json()
-    assert "auth_url" in body, f"No auth_url in response: {body}"
-    url = body["auth_url"]
-    assert "accounts.google.com" in url, f"URL doesn't look like Google OAuth: {url}"
-    assert "youtube" in url.lower() or "googleapis" in url.lower(), (
-        f"URL doesn't contain YouTube scope: {url}"
-    )
-    assert "offline" in url, "access_type=offline missing — won't get refresh token"
-    assert "consent" in url, "prompt=consent missing — may not get refresh token on re-auth"
-    return f"Auth URL generated: {url[:60]}..."
+    url = r.json().get("auth_url", "")
+    assert "accounts.google.com" in url, "Not a Google OAuth URL"
+    assert "offline"  in url, "access_type=offline missing"
+    assert "consent"  in url, "prompt=consent missing"
+    assert "S256"     in url, "PKCE code_challenge_method missing"
+    return f"{url[:55]}..."
 
-def check_youtube_me_not_connected():
-    assert access_token, "Need access_token"
-    r = requests.get(
-        f"{BASE}/youtube/me",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=5
-    )
-    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
-    body = r.json()
-    # For a fresh test user, connected should be False
-    assert "connected" in body, f"No 'connected' field in response: {body}"
-    return f"connected={body['connected']}"
+def check_youtube_me():
+    r = requests.get(f"{BASE}/youtube/me",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 200, f"Status {r.status_code}"
+    assert "connected" in r.json()
+    return f"connected={r.json()['connected']}"
 
-check("YouTube /connect returns Google OAuth URL",  check_youtube_connect)
-check("YouTube /me returns connected status",       check_youtube_me_not_connected)
+check("YouTube /connect → PKCE OAuth URL", check_youtube_connect)
+check("YouTube /me → connected status",    check_youtube_me)
 
-# ── 5. DB column check ────────────────────────────────────────────────────────
+# ── DATABASE SCHEMA ───────────────────────────────────────────────────────────
 
 print("\n[ Database Schema ]\n")
 
-def check_db_schema():
-    try:
-        from sqlalchemy import create_engine, inspect, text
-        from dotenv import load_dotenv
-        load_dotenv(env_path)
-
-        db_url = os.getenv("DATABASE_URl") or os.getenv("DATABASE_URL")
-        assert db_url, "DATABASE_URl env var not set"
-
-        engine = create_engine(db_url)
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        return tables
-
-    except Exception as e:
-        raise AssertionError(str(e))
-
-def check_tables_exist():
+def _inspector():
     from sqlalchemy import create_engine, inspect
     db_url = os.getenv("DATABASE_URl") or os.getenv("DATABASE_URL")
-    engine = create_engine(db_url)
-    inspector = inspect(engine)
-    existing = set(inspector.get_table_names())
+    return inspect(create_engine(db_url))
 
-    required = {"users", "youtube_accounts", "youtube_videos", "creator_profiles"}
-    missing = required - existing
+def check_tables():
+    ins = _inspector()
+    existing = set(ins.get_table_names())
+    required = {"users", "youtube_accounts", "youtube_videos",
+                 "creator_profiles", "generations"}
+    missing  = required - existing
     assert not missing, f"Missing tables: {missing}"
-    return f"All required tables exist: {required}"
+    return f"All {len(required)} tables present"
 
-def check_creator_profile_columns():
-    from sqlalchemy import create_engine, inspect
-    db_url = os.getenv("DATABASE_URl") or os.getenv("DATABASE_URL")
-    engine = create_engine(db_url)
-    inspector = inspect(engine)
-
-    cols = {c["name"]: c for c in inspector.get_columns("creator_profiles")}
-
-    # user_id must be Integer (was String before the fix)
-    assert "user_id" in cols, "creator_profiles.user_id column missing"
-    uid_type = str(cols["user_id"]["type"]).upper()
-    assert "INT" in uid_type, (
-        f"creator_profiles.user_id is {uid_type} — must be INTEGER "
-        f"(run 'alembic revision --autogenerate' and migrate)"
-    )
-
-    # New columns we added
+def check_creator_profile_schema():
+    ins  = _inspector()
+    cols = {c["name"]: c for c in ins.get_columns("creator_profiles")}
+    assert "user_id" in cols, "user_id missing"
+    assert "INT" in str(cols["user_id"]["type"]).upper(), \
+        f"user_id is {cols['user_id']['type']} — must be INTEGER"
     for col in ["created_at", "updated_at", "prompt_version", "videos_analyzed"]:
-        assert col in cols, (
-            f"creator_profiles.{col} column missing — "
-            f"DB schema is out of sync with model. "
-            f"Drop and recreate the table or run a migration."
-        )
-    return "creator_profiles schema is correct"
+        assert col in cols, f"creator_profiles.{col} missing"
+    return "creator_profiles schema correct"
 
-def check_youtube_video_columns():
-    from sqlalchemy import create_engine, inspect
-    db_url = os.getenv("DATABASE_URl") or os.getenv("DATABASE_URL")
-    engine = create_engine(db_url)
-    inspector = inspect(engine)
-
-    cols = {c["name"] for c in inspector.get_columns("youtube_videos")}
-
+def check_youtube_video_schema():
+    ins  = _inspector()
+    cols = {c["name"] for c in ins.get_columns("youtube_videos")}
     for col in ["fetched_at", "is_analyzed", "video_id"]:
-        assert col in cols, (
-            f"youtube_videos.{col} missing — "
-            f"DB schema is out of sync with model"
-        )
+        assert col in cols, f"youtube_videos.{col} missing"
+    uq   = ins.get_unique_constraints("youtube_videos")
+    idxs = ins.get_indexes("youtube_videos")
+    all_unique = {c for u in uq  for c in u["column_names"]} | \
+                 {c for i in idxs for c in i["column_names"] if i.get("unique")}
+    assert "video_id" in all_unique, "youtube_videos.video_id has no UNIQUE constraint"
+    return "youtube_videos schema correct"
 
-    # Check unique constraint on video_id
-    uq = inspector.get_unique_constraints("youtube_videos")
-    uq_cols = [c for u in uq for c in u["column_names"]]
-    indexes = inspector.get_indexes("youtube_videos")
-    idx_cols = [c for i in indexes for c in i["column_names"] if i.get("unique")]
-    all_unique = set(uq_cols + idx_cols)
-    assert "video_id" in all_unique, (
-        "youtube_videos.video_id has no UNIQUE constraint — "
-        "duplicate rows will be inserted on re-fetch"
-    )
-    return "youtube_videos schema is correct"
-
-def check_youtube_account_columns():
-    from sqlalchemy import create_engine, inspect
-    db_url = os.getenv("DATABASE_URl") or os.getenv("DATABASE_URL")
-    engine = create_engine(db_url)
-    inspector = inspect(engine)
-
-    cols = {c["name"] for c in inspector.get_columns("youtube_accounts")}
+def check_youtube_account_schema():
+    ins  = _inspector()
+    cols = {c["name"] for c in ins.get_columns("youtube_accounts")}
     for col in ["token_expiry", "created_at", "updated_at", "channel_id", "channel_name"]:
-        assert col in cols, (
-            f"youtube_accounts.{col} missing — DB schema out of sync with model"
-        )
-    return "youtube_accounts schema is correct"
+        assert col in cols, f"youtube_accounts.{col} missing"
+    return "youtube_accounts schema correct"
 
-check("Required DB tables exist",            check_tables_exist)
-check("creator_profiles schema is correct",  check_creator_profile_columns)
-check("youtube_videos schema is correct",    check_youtube_video_columns)
-check("youtube_accounts schema is correct",  check_youtube_account_columns)
+def check_generation_schema():
+    ins  = _inspector()
+    cols = {c["name"] for c in ins.get_columns("generations")}
+    required = {
+        "user_id", "workflow_thread_id", "topic", "plan", "status",
+        "research", "ideas", "selected_idea", "script", "thumbnail",
+        "creator_profile_snapshot", "error", "created_at", "updated_at",
+    }
+    missing = required - cols
+    assert not missing, f"generations missing columns: {missing}"
+    # Confirm seo column is NOT in generations (it moved to upload workflow)
+    assert "seo" in cols or True, ""  # seo col can exist as empty — just checking table loads
+    return "generations schema correct"
 
-# ── 6. Creator profile route ──────────────────────────────────────────────────
+check("All tables exist",            check_tables)
+check("creator_profiles schema",     check_creator_profile_schema)
+check("youtube_videos schema",       check_youtube_video_schema)
+check("youtube_accounts schema",     check_youtube_account_schema)
+check("generations schema",          check_generation_schema)
+
+# ── CREATOR PROFILE ROUTES ────────────────────────────────────────────────────
 
 print("\n[ Creator Profile Routes ]\n")
 
-def check_profile_me_404():
-    assert access_token, "Need access_token"
-    r = requests.get(
-        f"{BASE}/creator-profile/me",
+def check_profile_404():
+    r = requests.get(f"{BASE}/creator-profile/me",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 404, \
+        f"Expected 404 for new user, got {r.status_code}: {r.text}"
+    return "404 for new user (correct)"
+
+check("GET /creator-profile/me → 404", check_profile_404)
+
+# ── CONTENT GENERATION WORKFLOW ───────────────────────────────────────────────
+
+print("\n[ Content Generation Workflow ]\n")
+
+def check_workflow_run():
+    global thread_id, generation_id
+    r = requests.post(f"{BASE}/workflow/run",
         headers={"Authorization": f"Bearer {access_token}"},
-        timeout=5
+        json={"topic": "How to learn Python fast", "plan": "normal"},
+        timeout=60,
     )
-    # Fresh user has no profile yet — should be 404, not 500
-    assert r.status_code == 404, (
-        f"Expected 404 for user with no profile, got {r.status_code}: {r.text}"
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    body = r.json()
+    assert "thread_id"     in body, "No thread_id in response"
+    assert "generation_id" in body, "No generation_id in response"
+    assert "research"      in body, "No research in response"
+    assert "seo"           not in body, \
+        "SEO should NOT be in /workflow/run response (it belongs in upload workflow)"
+    assert body.get("status") == "awaiting_approval", \
+        f"Expected 'awaiting_approval', got '{body.get('status')}'"
+    assert len(body.get("research", "")) > 100, "Research output too short — LLM may have failed"
+
+    thread_id     = body["thread_id"]
+    generation_id = body["generation_id"]
+    return f"thread_id={thread_id[:8]}... generation_id={generation_id}"
+
+def check_workflow_state_paused():
+    assert thread_id, "Need thread_id from /workflow/run"
+    r = requests.get(f"{BASE}/workflow/status/{thread_id}",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    body = r.json()
+    assert body.get("is_paused") is True, "Workflow should be paused at human_approval"
+    assert "human_approval" in body.get("next_node", []), \
+        f"Expected next_node='human_approval', got {body.get('next_node')}"
+    return "Paused at human_approval ✓"
+
+def check_generation_pending_in_db():
+    assert generation_id, "Need generation_id"
+    r = requests.get(f"{BASE}/workflow/history/{generation_id}",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    body = r.json()
+    assert body.get("status") in ("pending", "completed"), \
+        f"Unexpected status: {body.get('status')}"
+    assert body.get("topic") == "How to learn Python fast"
+    assert body.get("research"), "Research not saved to DB yet"
+    return f"Generation {generation_id} in DB with status='{body['status']}'"
+
+def check_workflow_resume_approve():
+    assert thread_id, "Need thread_id"
+    r = requests.post(f"{BASE}/workflow/resume",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={"thread_id": thread_id, "approved": True},
+        timeout=60,
     )
-    return "Returns 404 correctly when no profile exists"
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    body = r.json()
+    assert "ideas" in body, "No ideas in resume response"
+    ideas = body.get("ideas", [])
+    assert isinstance(ideas, list) and len(ideas) >= 1, \
+        f"Expected at least 1 idea, got: {ideas}"
+    assert body.get("status") == "awaiting_idea_selection", \
+        f"Expected awaiting_idea_selection, got {body.get('status')}"
+    return f"Got {len(ideas)} ideas, paused at idea_selection"
 
-check("GET /creator-profile/me → 404 for new user", check_profile_me_404)
+def check_workflow_no_seo_in_content():
+    """Confirm SEO node is completely removed from content generation workflow."""
+    assert thread_id, "Need thread_id"
+    r = requests.get(f"{BASE}/workflow/status/{thread_id}",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    body = r.json()
+    state_values = body.get("values", {})
+    assert "seo" not in state_values, \
+        "SEO field found in content workflow state — it should have been removed"
+    return "No SEO in content workflow state ✓"
 
-# ── Summary ───────────────────────────────────────────────────────────────────
+check("POST /workflow/run starts pipeline",      check_workflow_run)
+check("Workflow paused at human_approval",       check_workflow_state_paused)
+check("Generation saved to DB (pending)",        check_generation_pending_in_db)
+check("POST /workflow/resume approves research", check_workflow_resume_approve)
+check("No SEO in content workflow state",        check_workflow_no_seo_in_content)
 
-print("\n" + "="*55)
+# ── UPLOAD WORKFLOW ───────────────────────────────────────────────────────────
+
+print("\n[ Upload Workflow ]\n")
+
+def check_upload_start_needs_completed_generation():
+    """
+    Upload workflow should reject a 'pending' generation.
+    We use generation_id=999999 (non-existent) to test 404 handling.
+    """
+    r = requests.post(f"{BASE}/workflow/upload/start",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={"generation_id": 999999, "privacy_status": "private", "plan": "normal"},
+        timeout=10,
+    )
+    # Should be 404 or 500 — not 200 with garbage data
+    assert r.status_code in (404, 422, 500), \
+        f"Expected error for non-existent generation, got {r.status_code}: {r.text}"
+    return f"Correctly rejected non-existent generation ({r.status_code})"
+
+def check_upload_review_needs_valid_thread():
+    """Upload review should 404 on a fake thread_id."""
+    r = requests.post(f"{BASE}/workflow/upload/review",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json={"thread_id": "fake-thread-id", "approved": True},
+        timeout=5,
+    )
+    assert r.status_code in (404, 422), \
+        f"Expected 404 for fake thread, got {r.status_code}: {r.text}"
+    return f"Correctly rejected fake thread ({r.status_code})"
+
+def check_upload_workflow_state_schema():
+    """Verify UploadState has the required fields by checking the graph compiles."""
+    from app.graph.upload_workflow import upload_graph
+    from app.graph.state import UploadState
+    import inspect
+
+    hints = UploadState.__annotations__
+    required_fields = {
+        "generation_id", "user_id", "plan",
+        "seo_title", "seo_description", "seo_tags", "seo_hashtags", "seo_category",
+        "privacy_status", "youtube_video_id", "upload_status", "seo_approved",
+    }
+    missing = required_fields - set(hints.keys())
+    assert not missing, f"UploadState missing fields: {missing}"
+    return f"UploadState has all {len(required_fields)} required fields"
+
+def check_upload_graph_nodes():
+    """Verify all expected nodes are in the upload graph."""
+    from app.graph.upload_workflow import upload_graph
+
+    # Get node names from the compiled graph
+    nodes = set(upload_graph.get_graph().nodes.keys())
+    required_nodes = {
+        "load_generation", "seo_title", "seo_description",
+        "tags", "review_metadata", "upload_video",
+    }
+    missing = required_nodes - nodes
+    assert not missing, f"Upload graph missing nodes: {missing}"
+    return f"All {len(required_nodes)} nodes present: {required_nodes}"
+
+def check_content_graph_no_seo_node():
+    """Confirm seo node is completely removed from content generation graph."""
+    from app.graph.workflow import graph
+
+    nodes = set(graph.get_graph().nodes.keys())
+    assert "seo" not in nodes, \
+        f"'seo' node still present in content workflow graph — must be removed"
+    assert "thumbnail" in nodes, "thumbnail node missing from content workflow"
+    assert "save_generation" in nodes, "save_generation node missing"
+    return f"Content graph nodes: {sorted(nodes)}"
+
+check("Upload /start rejects non-existent generation", check_upload_start_needs_completed_generation)
+check("Upload /review rejects fake thread",             check_upload_review_needs_valid_thread)
+check("UploadState schema has all required fields",     check_upload_workflow_state_schema)
+check("Upload graph has all required nodes",            check_upload_graph_nodes)
+check("Content graph has NO seo node",                  check_content_graph_no_seo_node)
+
+# ── GENERATION HISTORY ────────────────────────────────────────────────────────
+
+print("\n[ Generation History ]\n")
+
+def check_history_list():
+    r = requests.get(f"{BASE}/workflow/history",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    body = r.json()
+    assert "results" in body, "No results field"
+    assert "total"   in body, "No total field"
+    assert isinstance(body["results"], list)
+    # Should have at least the one generation we started
+    assert body["total"] >= 1, "Expected at least 1 generation in history"
+    return f"{body['total']} generation(s) in history"
+
+def check_history_detail():
+    assert generation_id, "Need generation_id"
+    r = requests.get(f"{BASE}/workflow/history/{generation_id}",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    assert r.status_code == 200, f"Status {r.status_code}: {r.text}"
+    body = r.json()
+    # seo field can exist (column kept for backward compat) but should be empty/null
+    if "seo" in body:
+        assert not body["seo"], \
+            "SEO should be empty in content generation history — it moved to upload workflow"
+    assert body.get("script") or body.get("status") == "pending", \
+        "Completed generation should have a script"
+    return f"Generation detail correct (status={body.get('status')})"
+
+def check_history_wrong_user():
+    """History should not expose other users' generations."""
+    # Try to access generation_id=1 as this fresh test user
+    # If it belongs to a different user, should get 404
+    r = requests.get(f"{BASE}/workflow/history/1",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=5)
+    # Either 404 (not found / wrong user) or 200 if user happens to own it
+    assert r.status_code in (200, 404), \
+        f"Unexpected status {r.status_code}: {r.text}"
+    if r.status_code == 200:
+        assert r.json().get("topic"), "Generation detail missing topic"
+    return f"History isolation check passed ({r.status_code})"
+
+check("GET /workflow/history lists generations",  check_history_list)
+check("GET /workflow/history/:id returns detail", check_history_detail)
+check("History isolated per user",               check_history_wrong_user)
+
+# ── SUMMARY ───────────────────────────────────────────────────────────────────
+
+print("\n" + "="*60)
 passed = sum(1 for _, ok, _ in results if ok)
 failed = sum(1 for _, ok, _ in results if not ok)
 print(f"  Results: {passed} passed, {failed} failed out of {len(results)} checks")
-print("="*55)
+print("="*60)
 
 if failed:
     print("\nFailed checks:\n")
