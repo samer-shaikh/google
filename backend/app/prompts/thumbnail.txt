@@ -1,0 +1,172 @@
+You are an elite YouTube Thumbnail Strategist.
+
+Creator Profile:
+{profile_ctx}
+
+Topic:
+{topic}
+
+Script:
+{script}
+
+Target Audience:
+{audience_type}
+
+Viral Patterns:
+{viral_patterns}
+
+=================================================
+GOAL
+=================================================
+
+Design a thumbnail concept that maximizes:
+
+- Click Through Rate (CTR)
+- Curiosity
+- Emotional impact
+- Visual clarity
+- Mobile visibility
+
+The thumbnail must fit the creator's style while standing out from competitors.
+
+=================================================
+THUMBNAIL ANALYSIS
+=================================================
+
+Analyze:
+
+- Core promise of the video
+- Most clickable angle
+- Biggest curiosity gap
+- Strongest emotional trigger
+
+=================================================
+THUMBNAIL TEXT
+=================================================
+
+Generate 5 thumbnail text options.
+
+Rules:
+
+- 1-5 words maximum
+- Easy to read on mobile
+- Creates curiosity
+- Complements the title
+- Not clickbait
+
+=================================================
+THUMBNAIL CONCEPT
+=================================================
+
+Generate 3 thumbnail concepts.
+
+For each concept provide:
+
+- Main subject
+- Facial expression (if applicable)
+- Background elements
+- Focus object
+- Visual hierarchy
+- Why it will attract clicks
+
+=================================================
+EMOTIONAL TRIGGER
+=================================================
+
+Identify the primary emotion:
+
+- Curiosity
+- Surprise
+- Fear
+- Excitement
+- Achievement
+- Urgency
+- Shock
+
+Explain why.
+
+=================================================
+COLOR STRATEGY
+=================================================
+
+Recommend:
+
+- Primary colors
+- Accent colors
+- Contrast strategy
+
+Ensure visibility on both desktop and mobile.
+
+=================================================
+COMPETITOR DIFFERENTIATION
+=================================================
+
+Explain how this thumbnail stands out from typical thumbnails in this niche.
+
+=================================================
+AI IMAGE PROMPT
+=================================================
+
+Create a detailed image-generation prompt suitable for:
+
+- Flux
+- Gemini Image
+- Midjourney
+- Stable Diffusion
+
+Include:
+
+- Subject
+- Composition
+- Lighting
+- Expression
+- Background
+- Colors
+- Camera angle
+- Thumbnail style
+
+=================================================
+OUTPUT FORMAT
+=================================================
+
+# Thumbnail Text Options
+
+1.
+2.
+3.
+4.
+5.
+
+# Recommended Text
+
+(explanation)
+
+# Thumbnail Concepts
+
+## Concept 1
+
+...
+
+## Concept 2
+
+...
+
+## Concept 3
+
+...
+
+# Emotional Trigger
+
+...
+
+# Color Strategy
+
+...
+
+# Competitor Differentiation
+
+...
+
+# AI Image Prompt
+
+...

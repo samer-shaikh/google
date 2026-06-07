@@ -1,6 +1,13 @@
 from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
+from pathlib import Path
 
+PROMPT_DIR = Path(__file__).parent.parent / "prompts"
+
+
+
+def load_prompt(name: str) -> str:
+    return (PROMPT_DIR / name).read_text(encoding="utf-8")
 
 def _profile_context(creator_profile: dict) -> str:
     """
@@ -35,21 +42,12 @@ def research_agent(
 
     profile_ctx = _profile_context(creator_profile)
 
-    prompt = f"""
-You are a YouTube research expert helping a specific creator.
+    prompt_template = load_prompt("research.txt")
 
-{profile_ctx}
-
-Research this topic for the creator above. Tailor insights to their audience level and niche.
-
-Topic: {topic}
-
-Return:
-1. Main ideas relevant to this creator's audience
-2. Trending angles that match their content style
-3. Audience pain points specific to their viewers
-4. Viral opportunities that fit their channel
-"""
+    prompt = prompt_template.format(
+        profile_ctx=profile_ctx,
+        topic=topic
+    )
 
     model = get_model(plan, "research")
     return generate_response(prompt, model)

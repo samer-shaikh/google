@@ -2,7 +2,7 @@ from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
 from app.agents.research_agent import _profile_context
 import json, re
-
+from app.agents.utils import load_prompt
 
 def video_idea_agent(
     topic: str,
@@ -18,26 +18,14 @@ def video_idea_agent(
         ts = creator_profile.get("title_style", {})
         title_style = ts.get("style", "") if isinstance(ts, dict) else str(ts)
 
-    prompt = f"""
-You are a YouTube strategist working for a specific creator.
+    prompt_template = load_prompt("video_idea_prompt.txt")
 
-{profile_ctx}
-
-Topic: {topic}
-
-Research:
-{research}
-
-Generate exactly 5 viral video ideas personalized for this creator.
-Match their title style: "{title_style}"
-Make ideas fit their audience level and niche — not generic YouTube advice.
-
-Return ONLY a JSON array of exactly 5 strings. No markdown, no explanation, no preamble.
-Each string is one complete video idea title + one sentence description.
-
-Example format:
-["Idea one title — one sentence why it works", "Idea two — one sentence", "Idea three — one sentence", "Idea four — one sentence", "Idea five — one sentence"]
-"""
+    prompt = prompt_template.format(
+        profile_ctx=profile_ctx,
+        topic=topic,
+        research=research,
+        title_style=title_style
+    )
 
     print("video ideas agent start working...")
     model = get_model(plan, "video_idea")

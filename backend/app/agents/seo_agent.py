@@ -1,7 +1,7 @@
 from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
 from app.agents.research_agent import _profile_context
-
+from app.agents.utils import load_prompt
 
 def seo_agent(
     topic: str,
@@ -20,27 +20,16 @@ def seo_agent(
     audience = creator_profile.get("audience", {}) if creator_profile else {}
     audience_type = audience.get("audience_type", "") if isinstance(audience, dict) else ""
 
-    prompt = f"""
-You are a YouTube SEO expert working for a specific creator.
+    prompt_template = load_prompt("seo.txt")
+    main_topics_str = ", ".join(main_topics)
 
-{profile_ctx}
-
-Topic: {topic}
-
-Script:
-{script}
-
-Generate SEO optimized for this creator's channel and audience ({audience_type}).
-Include their main topics ({", ".join(main_topics)}) naturally in tags and description.
-
-Generate:
-1. SEO Title — match the creator's title style, optimized for search
-2. Description — 150-200 words, matches their description style
-3. 15 Tags — mix of broad and niche tags relevant to their channel topics
-4. 10 Hashtags — relevant to their niche
-
-Return in clean markdown.
-"""
+    prompt = prompt_template.format(
+        profile_ctx=profile_ctx,
+        topic=topic,
+        script=script,
+        audience_type=audience_type,
+        main_topics=main_topics_str
+    )
 
     model = get_model(plan, "seo")
     return generate_response(prompt, model)
