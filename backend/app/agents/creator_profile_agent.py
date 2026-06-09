@@ -1,34 +1,20 @@
 """
 creator_profile_agent.py
 
-Previously this file had two completely separate implementations:
-  1. A CreatorProfileAgent CLASS that did statistical analysis from the DB with no LLM
-  2. A standalone creator_profile_agent() FUNCTION that called the LLM
-
-The workflow was calling the function. The /youtube/research route was calling the class.
-They produced different schemas and neither knew the other existed.
-
-Fix: The LLM function is now the single authoritative path. The class is kept
-for the statistical helper methods (used internally) but run() now delegates
-to the LLM function and validates output with Pydantic.
+Single authoritative implementation.
+After saving to PostgreSQL, also syncs to MongoDB creator_memory
+so that content_strengths and viral_patterns are persisted for agents.
 """
 import json
 import re
-from typing import Optional
 from pydantic import BaseModel, ValidationError
-
 from sqlalchemy.orm import Session
 
 from app.models.youtube_video import YouTubeVideo
-from app.models.creator_profile import CreatorProfile
+from app.models.creator_profile import CreatorProfile, CreatorProfileOutput
 from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
-from app.models.creator_profile import CreatorProfileOutput
 
-
-
-
-# ── Prompt version — bump this string whenever you change the prompt ──────────
 PROMPT_VERSION = "v1"
 
 
@@ -38,23 +24,11 @@ def creator_profile_agent(
     plan: str = "normal",
 ) -> CreatorProfileOutput:
     """
-    Analyze a YouTube creator using an LLM and return a validated profile.
-
-    Args:
-        channel_info: Dict from youtube_service.get_channel_info()
-        videos:       List of dicts from youtube_service.get_recent_videos()
-        plan:         User plan tier for model routing
-
-    Returns:
-        CreatorProfileOutput (Pydantic model — validated)
-
-    Raises:
-        ValueError if the LLM returns malformed JSON or missing required fields
+    Analyze a YouTube creator using the LLM and return a validated profile.
+    Raises ValueError on malformed LLM output — never stores garbage.
     """
-    # Sample to avoid blowing the context window on large channels
     sampled_videos = videos[:30]
 
-    # Build a compact video summary for the prompt
     video_summary = "\n".join(
         f"- \"{v['title']}\" | views: {v.get('views', 0)} | "
         f"likes: {v.get('likes', 0)} | comments: {v.get('comments', 0)}"
@@ -96,7 +70,6 @@ Use exactly these field names and types:
     model = get_model(plan, "research")
     raw_response = generate_response(prompt, model)
 
-    # Strip markdown code fences if the LLM wraps its output
     cleaned = re.sub(r"```[a-z]*", "", raw_response).strip().strip("`").strip()
 
     try:
@@ -118,15 +91,8 @@ Use exactly these field names and types:
     return profile
 
 
-# ── Statistical helpers (used by CreatorProfileAgent.run for DB-based analysis) ─
-
 class CreatorProfileAgent:
-    """
-    DB-backed agent that reads from youtube_videos, runs local statistical
-    analysis, calls the LLM via creator_profile_agent(), and saves the result.
-
-    This is what /youtube/research → profile creation flow should call.
-    """
+    """DB-backed orchestrator: fetch videos → LLM analysis → save."""
 
     def fetch_videos(self, user_id: int, db: Session) -> list:
         return (
@@ -135,15 +101,15 @@ class CreatorProfileAgent:
             .all()
         )
 
-    def _orm_videos_to_dicts(self, videos) -> list[dict]:
+    def _orm_to_dicts(self, videos) -> list[dict]:
         return [
             {
-                "video_id": v.video_id,
-                "title": v.title or "",
-                "description": (v.description or "")[:500],
-                "views": v.views or 0,
-                "likes": v.likes or 0,
-                "comments": v.comments or 0,
+                "video_id":     v.video_id,
+                "title":        v.title or "",
+                "description":  (v.description or "")[:500],
+                "views":        v.views or 0,
+                "likes":        v.likes or 0,
+                "comments":     v.comments or 0,
                 "published_at": str(v.published_at) if v.published_at else "",
             }
             for v in videos
@@ -158,7 +124,6 @@ class CreatorProfileAgent:
         videos_analyzed: int,
         db: Session,
     ) -> CreatorProfile:
-        # Upsert: update existing profile if one exists for this user+channel
         existing = (
             db.query(CreatorProfile)
             .filter(
@@ -168,41 +133,41 @@ class CreatorProfileAgent:
             .first()
         )
 
-        profile_data = profile_output.model_dump()
+        data = profile_output.model_dump()
 
         if existing:
-            existing.channel_name = channel_name
-            existing.topics = profile_data["main_topics"]
-            existing.audience = {
-                "audience_type": profile_data["audience_type"],
-                "audience_level": profile_data["audience_level"],
+            existing.channel_name      = channel_name
+            existing.topics            = data["main_topics"]
+            existing.audience          = {
+                "audience_type":  data["audience_type"],
+                "audience_level": data["audience_level"],
             }
-            existing.title_style = {"style": profile_data["title_style"]}
-            existing.description_style = {"style": profile_data["description_style"]}
-            existing.videos_analyzed = videos_analyzed
-            existing.prompt_version = PROMPT_VERSION
+            existing.title_style       = {"style": data["title_style"]}
+            existing.description_style = {"style": data["description_style"]}
+            existing.videos_analyzed   = videos_analyzed
+            existing.prompt_version    = PROMPT_VERSION
             profile = existing
         else:
             profile = CreatorProfile(
-                user_id=user_id,
-                channel_id=channel_id,
-                channel_name=channel_name,
-                topics=profile_data["main_topics"],
+                user_id=           user_id,
+                channel_id=        channel_id,
+                channel_name=      channel_name,
+                topics=            data["main_topics"],
                 audience={
-                    "audience_type": profile_data["audience_type"],
-                    "audience_level": profile_data["audience_level"],
+                    "audience_type":  data["audience_type"],
+                    "audience_level": data["audience_level"],
                 },
-                title_style={"style": profile_data["title_style"]},
-                description_style={"style": profile_data["description_style"]},
-                videos_analyzed=videos_analyzed,
-                prompt_version=PROMPT_VERSION,
+                title_style=       {"style": data["title_style"]},
+                description_style= {"style": data["description_style"]},
+                videos_analyzed=   videos_analyzed,
+                prompt_version=    PROMPT_VERSION,
             )
             db.add(profile)
 
         db.commit()
         db.refresh(profile)
 
-        # Mark all processed videos as analyzed
+        # Mark processed videos as analyzed
         db.query(YouTubeVideo).filter(
             YouTubeVideo.user_id == user_id,
             YouTubeVideo.is_analyzed == False,  # noqa: E712
@@ -211,24 +176,71 @@ class CreatorProfileAgent:
 
         return profile
 
+    def _sync_to_mongodb(
+        self,
+        user_id: int,
+        channel_id: str,
+        channel_name: str,
+        profile_output: CreatorProfileOutput,
+    ) -> None:
+        """
+        After saving to PostgreSQL, sync the full LLM output to MongoDB
+        creator_memory so content_strengths and viral_patterns are persisted.
+
+        This is the fix that makes viral_patterns non-empty for the first time.
+        """
+        try:
+            from app.memory import get_creator_memory_service
+            svc = get_creator_memory_service()
+            profile_dict = profile_output.model_dump()
+
+            # Build the full profile data dict in the format memory service expects
+            profile_data_for_memory = {
+                "creator_niche":          profile_dict["creator_niche"],
+                "main_topics":            profile_dict["main_topics"],
+                "topics":                 profile_dict["main_topics"],
+                "audience_type":          profile_dict["audience_type"],
+                "audience_level":         profile_dict["audience_level"],
+                "title_style":            profile_dict["title_style"],
+                "description_style":      profile_dict["description_style"],
+                # THE KEY FIX: these are now written to MongoDB from real LLM output
+                "content_strengths":      profile_dict["content_strengths"],
+                "viral_patterns":         profile_dict["viral_patterns"],
+                "recommended_video_types":profile_dict["recommended_video_types"],
+            }
+
+            svc.sync_from_profile(
+                user_id=user_id,
+                profile_data=profile_data_for_memory,
+                channel_id=channel_id,
+                channel_name=channel_name,
+            )
+            print(
+                f"[CreatorProfileAgent] synced to MongoDB — "
+                f"viral_patterns={len(profile_dict['viral_patterns'])} | "
+                f"content_strengths={len(profile_dict['content_strengths'])}"
+            )
+        except Exception as e:
+            # Non-fatal — PostgreSQL is the authoritative store
+            print(f"[CreatorProfileAgent] MongoDB sync warning (non-fatal): {e}")
+
     def run(self, user_id: int, channel_info: dict, db: Session) -> dict:
         """
-        Full profile generation flow:
-        1. Read videos from DB (saved by YouTubeResearchAgent)
-        2. Call LLM via creator_profile_agent()
-        3. Validate output
-        4. Save to creator_profiles table
+        Full profile generation:
+        1. Read videos from DB
+        2. LLM analysis + Pydantic validation
+        3. Save to PostgreSQL (authoritative)
+        4. Sync to MongoDB creator_memory (learning store)
         """
         orm_videos = self.fetch_videos(user_id=user_id, db=db)
 
         if not orm_videos:
             raise Exception(
-                "No YouTube videos found in DB. "
-                "Run /youtube/research first to fetch and store videos."
+                "No YouTube videos in DB. "
+                "Run /youtube/research first."
             )
 
-        video_dicts = self._orm_videos_to_dicts(orm_videos)
-
+        video_dicts    = self._orm_to_dicts(orm_videos)
         profile_output = creator_profile_agent(
             channel_info=channel_info,
             videos=video_dicts,
@@ -243,9 +255,17 @@ class CreatorProfileAgent:
             db=db,
         )
 
+        # Sync the full LLM output (including viral_patterns) to MongoDB
+        self._sync_to_mongodb(
+            user_id=user_id,
+            channel_id=channel_info["channel_id"],
+            channel_name=channel_info["channel_name"],
+            profile_output=profile_output,
+        )
+
         return {
-            "success": True,
-            "profile_id": profile.id,
+            "success":         True,
+            "profile_id":      profile.id,
             "videos_analyzed": len(orm_videos),
-            "profile": profile_output.model_dump(),
+            "profile":         profile_output.model_dump(),
         }

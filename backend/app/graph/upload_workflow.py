@@ -450,12 +450,23 @@ def _build_upload_graph(checkpointer):
     return builder.compile(checkpointer=checkpointer)
 
 
-# ── Singleton — survives uvicorn --reload ────────────────────────
+# ── Singleton — built once after FastAPI lifespan startup ──────
 
 import sys as _sys
 _MODULE = _sys.modules[__name__]
 
-if not hasattr(_MODULE, "_upload_graph"):
-    _MODULE._upload_graph = _build_upload_graph(get_checkpointer())
+upload_graph = None   # set by init_upload_graph() in main.py
 
-upload_graph = _MODULE._upload_graph
+
+def init_upload_graph():
+    """
+    Build and cache the upload workflow graph.
+    Called once from FastAPI lifespan startup AFTER checkpointer is ready.
+    """
+    if not hasattr(_MODULE, "_upload_graph") or _MODULE._upload_graph is None:
+        _MODULE._upload_graph = _build_upload_graph(get_checkpointer())
+        print("[upload_workflow] upload graph compiled")
+
+    import app.graph.upload_workflow as _self
+    _self.upload_graph = _MODULE._upload_graph
+    return _MODULE._upload_graph

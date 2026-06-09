@@ -1,33 +1,36 @@
 from typing import TypedDict, Optional
 
 
-# ── Content Generation Workflow State ────────────────────────────
-# Research → Ideas → Script → Thumbnail → Save
-# SEO is NOT part of this workflow — it belongs in the Upload Workflow.
-
 class AgentState(TypedDict, total=False):
     topic: str
     plan: str
 
     # Loaded from DB at workflow start
     user_id: int
-    creator_profile: dict
+    creator_profile: dict   # PostgreSQL profile + MongoDB memory merged
 
-    # Generation record ID — created at /workflow/run, updated throughout
+    # Generation record ID
     generation_id: int
 
-    # Pipeline outputs
+    # ── MongoDB memory fields (populated by load_memory_node) ─────
+    # Previously these were always [] — now populated from creator_memory
+    viral_patterns: list[str]
+    content_strengths: list[str]
+    successful_hooks: list[str]
+    successful_title_patterns: list[str]
+    topic_history: list[str]
+    audience_intelligence: dict
+
+    # ── Pipeline outputs ──────────────────────────────────────────
     research: str
     ideas: list[str]
     selected_idea: str
     script: str
-    thumbnail: str          # thumbnail concept/prompt from ThumbnailAgent
+    thumbnail: str
 
-    # HITL
+    # ── HITL ─────────────────────────────────────────────────────
     human_approved: Optional[bool]
 
-
-# ── Creator Profile Workflow State ───────────────────────────────
 
 class CreatorProfileState(TypedDict, total=False):
     user_id: int
@@ -39,55 +42,37 @@ class CreatorProfileState(TypedDict, total=False):
     profile_id: int
 
 
-# ── Upload / Publishing Workflow State ───────────────────────────
-# Dedicated to the separate publishing pipeline.
-# SEO generation lives here, not in the content generation workflow.
-
 class UploadState(TypedDict, total=False):
-    # Inputs
     generation_id: int
     user_id: int
     plan: str
+    video_file_path: str
+    thumbnail_file_path: str
 
-    # Content pulled from the generation record
     topic: str
     script: str
     thumbnail: str
 
-    # Video file path — provided by the user when starting the upload workflow
-    # Must be an absolute path to a .mp4 / .mov file on the server
-    video_file_path: str
-
-    # SEO outputs
     seo_title: str
     seo_description: str
     seo_tags: list[str]
     seo_hashtags: list[str]
     seo_category: str
 
-    # Upload metadata
     privacy_status: str
     scheduled_at: Optional[str]
 
-    # Thumbnail upload result
     thumbnail_uploaded: bool
-    thumbnail_status: str       # "uploaded" | "failed" | "skipped"
+    thumbnail_status: str
     thumbnail_error: Optional[str]
 
-    # Video upload result
     youtube_video_id: str
     youtube_video_url: str
-    upload_status: str          # "pending" | "uploaded" | "failed" | "cancelled"
+    upload_status: str
     upload_error: Optional[str]
 
-    # Upload record ID — created before upload, updated after
     upload_record_id: int
-
-    # Which provider was used
-    provider_used: str          # "api" | "mcp"
-
-    # Published timestamp
+    provider_used: str
     published_at: Optional[str]
 
-    # HITL
     seo_approved: Optional[bool]

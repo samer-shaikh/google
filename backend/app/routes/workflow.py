@@ -6,8 +6,34 @@ from typing import Optional
 from langgraph.types import Command
 from sqlalchemy.orm import Session
 
-from app.graph.workflow import graph
-from app.graph.upload_workflow import upload_graph
+# Graphs are initialized during FastAPI lifespan startup (main.py).
+# Import the modules here but access .graph / .upload_graph lazily
+# inside each route so we always get the live compiled instance.
+import app.graph.workflow as _wf_module
+import app.graph.upload_workflow as _uwf_module
+
+
+def _graph():
+    """Return the live content generation graph."""
+    g = _wf_module.graph
+    if g is None:
+        raise RuntimeError(
+            "Content generation graph is not initialized. "
+            "This means the FastAPI lifespan startup hook did not run. "
+            "Ensure uvicorn is started normally (not imported directly)."
+        )
+    return g
+
+
+def _upload_graph():
+    """Return the live upload workflow graph."""
+    g = _uwf_module.upload_graph
+    if g is None:
+        raise RuntimeError(
+            "Upload graph is not initialized. "
+            "This means the FastAPI lifespan startup hook did not run."
+        )
+    return g
 from app.models.plan import Plan
 from app.dependencies.auth import get_current_user
 from app.models.user import User
@@ -96,7 +122,7 @@ def run_workflow(
         db=db,
     )
 
-    result = graph.invoke(
+    result = _graph().invoke(
         {
             "topic":         data.topic,
             "plan":          data.plan.value,
@@ -106,7 +132,7 @@ def run_workflow(
         config=config,
     )
 
-    state  = graph.get_state(config)
+    state  = _graph().get_state(config)
     paused = _paused_at(state)
 
     return {
@@ -130,7 +156,7 @@ def resume_workflow(
     """
     config = {"configurable": {"thread_id": data.thread_id}}
 
-    state = graph.get_state(config)
+    state = _graph().get_state(config)
     if not state or not state.values:
         raise HTTPException(
             status_code=404,
@@ -146,7 +172,7 @@ def resume_workflow(
             detail=f"Graph is paused at '{paused}', not 'human_approval'."
         )
 
-    result = graph.invoke(Command(resume=data.approved), config=config)
+    result = _graph().invoke(Command(resume=data.approved), config=config)
 
     if not data.approved:
         return {
@@ -155,7 +181,7 @@ def resume_workflow(
             "message":   "Workflow rejected. Generation marked as failed.",
         }
 
-    new_state  = graph.get_state(config)
+    new_state  = _graph().get_state(config)
     paused_now = _paused_at(new_state)
     ideas      = result.get("ideas", [])
     ideas      = ideas if isinstance(ideas, list) else []
@@ -181,7 +207,7 @@ def select_idea(
     """
     config = {"configurable": {"thread_id": data.thread_id}}
 
-    state = graph.get_state(config)
+    state = _graph().get_state(config)
     if not state or not state.values:
         raise HTTPException(status_code=404, detail=f"Thread '{data.thread_id}' not found.")
     if not state.next:
@@ -194,7 +220,7 @@ def select_idea(
             detail=f"Graph is paused at '{paused}', not 'idea_selection'."
         )
 
-    result     = graph.invoke(Command(resume=data.selected_idea), config=config)
+    result     = _graph().invoke(Command(resume=data.selected_idea), config=config)
     generation = get_generation_by_workflow_thread(data.thread_id, db)
 
     return {
@@ -214,7 +240,7 @@ def select_idea(
 @router.get("/status/{thread_id}")
 def get_workflow_status(thread_id: str):
     config = {"configurable": {"thread_id": thread_id}}
-    state  = graph.get_state(config)
+    state  = _graph().get_state(config)
 
     if not state or not state.values:
         raise HTTPException(status_code=404, detail="Thread not found.")
@@ -326,9 +352,9 @@ def start_upload_workflow(
     if data.thumbnail_file_path:
         initial_state["thumbnail_file_path"] = data.thumbnail_file_path
 
-    result = upload_graph.invoke(initial_state, config=config)
+    result = _upload_graph().invoke(initial_state, config=config)
 
-    state  = upload_graph.get_state(config)
+    state  = _upload_graph().get_state(config)
     paused = _paused_at(state)
 
     return {
@@ -356,7 +382,7 @@ def review_upload_metadata(data: UploadReviewRequest):
     """
     config = {"configurable": {"thread_id": data.thread_id}}
 
-    state = upload_graph.get_state(config)
+    state = _upload_graph().get_state(config)
     if not state or not state.values:
         raise HTTPException(
             status_code=404,
@@ -380,9 +406,9 @@ def review_upload_metadata(data: UploadReviewRequest):
     if data.privacy_status:  updates["privacy_status"]  = data.privacy_status
 
     if updates:
-        upload_graph.update_state(config, updates)
+        _upload_graph().update_state(config, updates)
 
-    result = upload_graph.invoke(Command(resume=data.approved), config=config)
+    result = _upload_graph().invoke(Command(resume=data.approved), config=config)
 
     if not data.approved:
         return {
