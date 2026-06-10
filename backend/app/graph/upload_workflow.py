@@ -423,6 +423,7 @@ def save_upload_result_node(state: UploadState) -> dict:
                 youtube_video_url= state.get("youtube_video_url", ""),
                 thumbnail_status=  state.get("thumbnail_status",  "skipped"),
                 provider_used=     state.get("provider_used",     "api"),
+                upload_status=     upload_status,
                 db=db,
             )
         elif upload_status == "cancelled":
@@ -441,7 +442,7 @@ def save_upload_result_node(state: UploadState) -> dict:
         db.close()
 
     # Update MongoDB content_piece with YouTube result (non-fatal)
-    if user_id and upload_status in ("uploaded", "metadata_ready"):
+    if user_id and upload_status == "uploaded":
         try:
             from app.mcp.mongodb.tools import upsert_one
             from datetime import datetime, timezone

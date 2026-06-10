@@ -57,62 +57,67 @@ async def auth_callback(
     request: Request,
     db: Session = Depends(get_db)
 ):
+    from fastapi.responses import HTMLResponse
 
-    token = await oauth.google.authorize_access_token(
-        request
-    )
-
+    token = await oauth.google.authorize_access_token(request)
     user_info = token.get("userinfo")
-
     email = user_info["email"]
 
-    existing_user = (
-        db.query(User)
-        .filter(User.email == email)
-        .first()
-    )
+    existing_user = db.query(User).filter(User.email == email).first()
 
     if not existing_user:
-
         new_user = User(
             email=user_info["email"],
             google_id=user_info["sub"],
             name=user_info["name"],
-            picture=user_info["picture"]
+            picture=user_info.get("picture", ""),
         )
-
         db.add(new_user)
         db.commit()
         db.refresh(new_user)
-
         existing_user = new_user
 
     access_token = create_token(
-        {
-            "sub": existing_user.email,
-            "type": "access"
-        },
+        {"sub": existing_user.email, "type": "access"},
         timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-
     refresh_token = create_token(
-        {
-            "sub": existing_user.email,
-            "type": "refresh"
-        },
+        {"sub": existing_user.email, "type": "refresh"},
         timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     )
 
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "user": {
-            "id": existing_user.id,
-            "email": existing_user.email,
-            "name": existing_user.name
-        }
-    }
+    # Return an HTML page that sends the tokens to the parent window via postMessage
+    # and closes the popup — the frontend listener in login/page.tsx picks this up
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head><title>Authenticating...</title></head>
+    <body>
+      <script>
+        try {{
+          window.opener.postMessage(
+            {{
+              type: "GOOGLE_AUTH_SUCCESS",
+              access_token: "{access_token}",
+              refresh_token: "{refresh_token}",
+              user: {{
+                id: {existing_user.id},
+                email: "{existing_user.email}",
+                name: "{existing_user.name}"
+              }}
+            }},
+            "http://localhost:3000"
+          );
+        }} catch(e) {{
+          console.error("postMessage failed:", e);
+        }}
+        window.close();
+      </script>
+      <p>Authentication successful! This window will close automatically.</p>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html)
 #==================================== normal login =========================================
 
 @router.post("/signup")

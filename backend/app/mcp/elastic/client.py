@@ -28,7 +28,8 @@ def is_elastic_enabled() -> bool:
 
 
 def get_elastic_client():
-    """Return Elasticsearch client. None if not configured."""
+    """Return Elasticsearch client. None if not configured."""  
+
     if hasattr(_MODULE, "_client"):
         return _MODULE._client
 
@@ -54,7 +55,6 @@ def get_elastic_client():
 
         # Verify connection
         info = client.info()
-        print(f"[elastic] Connected — cluster: {info['cluster_name']}")
         log.info(f"[elastic] Connected — cluster: {info['cluster_name']}")
         _MODULE._client = client
         return client
@@ -69,6 +69,6 @@ def get_elastic_client():
         return None
 
     except Exception as e:
-        log.warning(f"[elastic] Connection failed: {e} — trend intelligence disabled")
+        log.warning(f"[elastic] Connection failed: {e}")
         _MODULE._client = None
         return None

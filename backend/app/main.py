@@ -28,6 +28,7 @@ from app.routes.auth import router as auth_router
 from app.routes.thread import router as thread_router
 from app.routes.youtube import router as youtube_router
 from app.routes.creator_profile import router as creator_profile_router
+from app.routes.upload import router as upload_router
 from app.routes.agent import router as agent_router
 
 from app.database import Base, engine
@@ -151,6 +152,8 @@ async def lifespan(app: FastAPI):
     print("[lifespan] shutdown complete")
 
 
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI(
     title="AI Content Studio",
     description="Multi-agent content creation platform for YouTube",
@@ -232,4 +235,5 @@ app.include_router(thread_router)
 app.include_router(youtube_router)
 app.include_router(creator_profile_router)
 app.include_router(workflow_router)
+app.include_router(upload_router)
 app.include_router(agent_router)

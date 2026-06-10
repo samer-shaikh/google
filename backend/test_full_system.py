@@ -329,8 +329,8 @@ def test_elasticsearch():
         record("pass", f"Elasticsearch connected — cluster: {info_resp['cluster_name']}")
 
         # Check indexes
-        from app.mcp.elastic.indexes import INDEX_NAMES
-        for index_name in INDEX_NAMES:
+        from app.mcp.elastic.indexes import ALL_INDEXES
+        for index_name in ALL_INDEXES:
             exists = client.indices.exists(index=index_name)
             if exists:
                 count = client.count(index=index_name)["count"]

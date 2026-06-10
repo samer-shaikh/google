@@ -44,10 +44,11 @@ def complete_upload_record(
     thumbnail_status: str,
     provider_used: str,
     db: Session,
+    upload_status: str = "uploaded",
 ) -> UploadRecord:
     """Mark upload complete with YouTube result."""
     db.query(UploadRecord).filter(UploadRecord.id == record_id).update({
-        "upload_status":    "uploaded",
+        "upload_status":    upload_status,
         "youtube_video_id":  youtube_video_id,
         "youtube_video_url": youtube_video_url,
         "thumbnail_status":  thumbnail_status,
