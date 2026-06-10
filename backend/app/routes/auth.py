@@ -125,7 +125,10 @@ def signup(
     ).first()
 
     if existing:
-        return {"error": "email already exists"}
+        raise ConflictException("Email already registered")
+
+    if db.query(User).filter(User.name == data.name).first():
+        raise ConflictException("name already taken")
 
     user = User(
         email=data.email,
@@ -150,13 +153,13 @@ def login(
     ).first()
 
     if not user:
-        return {"error": "Email not found"}
+        raise UnauthorizedException("Email not found")
 
     if not verify_password(
         data.password,
         user.password_hash
     ):
-        return {"error": "Wrong password"}
+        raise UnauthorizedException("Wrong password")
 
     access_token = create_token(
         {

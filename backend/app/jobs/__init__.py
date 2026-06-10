@@ -1,1 +1,2 @@
-# Background jobs — trend ingestion, competitor analysis, performance polling
+from app.jobs.trend_ingestion import run_trend_ingestion_for_all_users, seed_competitor_data, seed_audience_questions
+from app.jobs.competitor_ingestion import run_competitor_ingestion, run_competitor_ingestion_for_user

@@ -12,23 +12,32 @@ class AgentState(TypedDict, total=False):
     # Generation record ID
     generation_id: int
 
-    # ── MongoDB memory fields (populated by load_memory_node) ─────
-    # Previously these were always [] — now populated from creator_memory
+    # -- MongoDB memory fields (populated by load_memory_node) -------------
     viral_patterns: list[str]
     content_strengths: list[str]
     successful_hooks: list[str]
     successful_title_patterns: list[str]
     topic_history: list[str]
     audience_intelligence: dict
+    content_gaps: list[str]          # from content_gap_agent
 
-    # ── Pipeline outputs ──────────────────────────────────────────
+    # -- Elastic intelligence fields ----------------------------------------
+    trending_topics: list[dict]       # from trend_agent / Elastic
+    competitor_insights: list[dict]   # from Elastic competitor_content
+
+    # -- Pipeline outputs ---------------------------------------------------
     research: str
     ideas: list[str]
     selected_idea: str
     script: str
     thumbnail: str
 
-    # ── HITL ─────────────────────────────────────────────────────
+    # -- Critic Agent fields ------------------------------------------------
+    script_quality_score: float
+    script_critique: str
+    script_revision_count: int
+
+    # -- HITL ---------------------------------------------------------------
     human_approved: Optional[bool]
 
 

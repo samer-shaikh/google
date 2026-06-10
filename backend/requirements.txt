@@ -19,3 +19,5 @@ google-api-python-client
 starlette
 requests
 pymongo
+elasticsearch>=8.0.0
+mcp>=1.0.0

@@ -2,8 +2,55 @@ from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
 from app.agents.research_agent import _profile_context
 from app.agents.utils import load_prompt
+import asyncio
+import logging
 import json
 import re
+
+log = logging.getLogger(__name__)
+
+
+def _try_mcp_creator_memory(user_id: int, past_topics: list[str], title_patterns: list[str]):
+    """
+    Attempt to enrich past_topics and title_patterns via MongoDB MCP.
+    Returns (past_topics, title_patterns) — falls back to originals if MCP unavailable.
+    Never raises.
+    """
+    if not user_id:
+        return past_topics, title_patterns
+    try:
+        from app.mcp.mongodb.mcp_runner import call_mcp_tool
+        import concurrent.futures
+
+        async def _fetch():
+            doc = await call_mcp_tool("find", {
+                "collection": "creator_memory",
+                "filter": {"user_id": user_id},
+                "limit": 1,
+                "projection": {"topic_history": 1, "successful_title_patterns": 1},
+            })
+            if doc and isinstance(doc, list) and len(doc) > 0:
+                return doc[0]
+            return None
+
+        # Run in a fresh thread to avoid deadlocking inside LangGraph's event loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _fetch())
+            mem_doc = future.result(timeout=8.0)
+
+        if mem_doc:
+            mcp_topics = mem_doc.get("topic_history", [])
+            mcp_patterns = mem_doc.get("successful_title_patterns", [])
+            merged_topics = list(dict.fromkeys(mcp_topics + past_topics))
+            merged_patterns = list(dict.fromkeys(mcp_patterns + title_patterns))
+            log.info(
+                f"[video_idea_agent] MCP memory: {len(merged_topics)} topics, "
+                f"{len(merged_patterns)} title patterns"
+            )
+            return merged_topics, merged_patterns
+    except Exception as e:
+        log.debug(f"[video_idea_agent] MCP memory fetch skipped: {e}")
+    return past_topics, title_patterns
 
 
 def _memory_context(
@@ -49,6 +96,11 @@ def video_idea_agent(
       - successful_title_patterns: biases titles toward proven patterns
       - viral_patterns + content_strengths now populated via creator_profile
     """
+    user_id = creator_profile.get("user_id") if creator_profile else None
+    past_topics, successful_title_patterns = _try_mcp_creator_memory(
+        user_id, past_topics, successful_title_patterns
+    )
+
     profile_ctx = _profile_context(creator_profile)
     memory_ctx  = _memory_context(past_topics, successful_title_patterns)
 

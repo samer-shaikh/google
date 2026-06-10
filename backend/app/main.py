@@ -8,6 +8,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+
+def _run_startup_trend_ingestion():
+    """Background thread: seed trends for all creators on startup."""
+    try:
+        from app.jobs.trend_ingestion import run_trend_ingestion_for_all_users
+        result = run_trend_ingestion_for_all_users()
+        print(f"[trend_ingestion] startup complete: {result}")
+    except Exception as e:
+        print(f"[trend_ingestion] startup failed (non-fatal): {e}")
+
 from app.routes.ideas import router as ideas_router
 from app.routes.script import router as script_router
 from app.routes.thumbnail import router as thumbnail_router
@@ -18,6 +28,7 @@ from app.routes.auth import router as auth_router
 from app.routes.thread import router as thread_router
 from app.routes.youtube import router as youtube_router
 from app.routes.creator_profile import router as creator_profile_router
+from app.routes.agent import router as agent_router
 
 from app.database import Base, engine
 
@@ -57,6 +68,56 @@ async def lifespan(app: FastAPI):
     from app.mcp.mongodb.client import get_mongodb_client
     get_mongodb_client()
 
+    # Step 2b: pre-warm the MongoDB MCP server subprocess
+    try:
+        from app.mcp.mongodb.mcp_runner import call_mcp_tool
+        result = await call_mcp_tool("find", {
+            "collection": "creator_memory",
+            "filter": {},
+            "limit": 1,
+        })
+        if result is not None:
+            print("[mcp_runner] ✅ MongoDB MCP server is ACTIVE and responding")
+        else:
+            print("[mcp_runner] ✅ MongoDB MCP server is ACTIVE (collection empty — normal on first run)")
+    except Exception as e:
+        print(f"[mcp_runner] ⚠️  MongoDB MCP server not available: {e} — falling back to PyMongo")
+
+    # Step 2c: initialize Elasticsearch + create indexes if configured
+    try:
+        from app.mcp.elastic.client import get_elastic_client, is_elastic_enabled
+        if is_elastic_enabled():
+            client = get_elastic_client()
+            if client:
+                from app.mcp.elastic.indexes import setup_indexes
+                setup_indexes()
+                print("[elastic] ✅ Elasticsearch connected — indexes ready")
+
+                # Pre-warm Elastic MCP subprocess if ELASTIC_MCP_URL is set
+                import os
+                if os.getenv("ELASTIC_MCP_URL", "").strip():
+                    from app.mcp.elastic.mcp_runner import call_elastic_tool
+                    await call_elastic_tool("search", {
+                        "index": "trending_topics",
+                        "query": {"match_all": {}},
+                        "size": 1,
+                    })
+                    print("[elastic_mcp] ✅ Elasticsearch MCP server is ACTIVE")
+        else:
+            print("[elastic] ℹ️  ELASTICSEARCH_URL not set — trend intelligence disabled (add to .env to enable)")
+    except Exception as e:
+        print(f"[elastic] ⚠️  Elasticsearch startup warning: {e}")
+
+    # Step 2d: run background trend ingestion if Elastic is ready
+    try:
+        from app.mcp.elastic.client import is_elastic_enabled
+        if is_elastic_enabled():
+            import asyncio
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, _run_startup_trend_ingestion)
+    except Exception as e:
+        print(f"[trend_ingestion] startup ingestion warning: {e}")
+
     # Step 3: compile graphs AFTER checkpointer connection is live
     from app.graph.workflow import init_content_graph
     from app.graph.upload_workflow import init_upload_graph
@@ -70,6 +131,22 @@ async def lifespan(app: FastAPI):
 
     from app.graph.checkpointer import shutdown_checkpointer
     shutdown_checkpointer()
+
+    # Gracefully stop MongoDB MCP subprocess if it was started
+    try:
+        from app.mcp.mongodb.mcp_runner import shutdown_mcp
+        await shutdown_mcp()
+        print("[mcp_runner] MongoDB MCP server stopped")
+    except Exception:
+        pass
+
+    # Gracefully stop Elasticsearch MCP subprocess if it was started
+    try:
+        from app.mcp.elastic.mcp_runner import shutdown_elastic_mcp
+        await shutdown_elastic_mcp()
+        print("[elastic_mcp] Elasticsearch MCP server stopped")
+    except Exception:
+        pass
 
     print("[lifespan] shutdown complete")
 
@@ -155,3 +232,4 @@ app.include_router(thread_router)
 app.include_router(youtube_router)
 app.include_router(creator_profile_router)
 app.include_router(workflow_router)
+app.include_router(agent_router)

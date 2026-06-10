@@ -3,13 +3,14 @@ upload_workflow.py — Video Publishing Pipeline
 
 Graph:
   load_generation → seo_title → seo_description → tags →
-  review_metadata (HITL) → upload_thumbnail → upload_video →
+  review_metadata (HITL) → upload_video → upload_thumbnail →
   save_upload_result → END
 
-All existing nodes are preserved unchanged.
-Three new nodes added: upload_thumbnail, upload_video (real), save_upload_result.
-Provider abstraction: workflow calls get_youtube_provider() — works with
-Data API or MCP depending on environment configuration.
+SEO nodes now:
+  - use the rich seo.txt prompt template
+  - inject creator profile context (audience, niche, title style)
+  - read keyword_performance from Elastic when available
+  - save SEO metadata to MongoDB content_pieces after successful upload
 """
 from langgraph.graph import StateGraph, END
 from langgraph.types import interrupt
@@ -19,9 +20,35 @@ from app.graph.state import UploadState
 from app.graph.checkpointer import get_checkpointer
 
 
-# ══════════════════════════════════════════════════════════════════
-# EXISTING NODES — unchanged
-# ══════════════════════════════════════════════════════════════════
+# ── Helper: load creator profile for upload SEO nodes ────────────────────────
+
+def _get_creator_profile(user_id: int) -> dict:
+    """
+    Load creator profile from MongoDB memory for SEO personalization.
+    Falls back to empty dict — SEO nodes degrade gracefully.
+    """
+    try:
+        from app.memory import get_creator_memory_service
+        ctx = get_creator_memory_service().get_context_for_agents(user_id)
+        return ctx
+    except Exception:
+        return {}
+
+
+def _get_performing_keywords(user_id: int, niche: str) -> list[str]:
+    """
+    Fetch best-performing keywords from Elastic for SEO enrichment.
+    Returns [] if Elastic not configured.
+    """
+    try:
+        from app.mcp.elastic.tools import search_performing_keywords
+        results = search_performing_keywords(user_id=user_id, niche=niche, limit=10)
+        return [r.get("keyword", "") for r in results if r.get("keyword")]
+    except Exception:
+        return []
+
+
+# ── Node 1: load_generation ───────────────────────────────────────────────────
 
 def load_generation_node(state: UploadState) -> dict:
     generation_id = state.get("generation_id")
@@ -60,62 +87,113 @@ def load_generation_node(state: UploadState) -> dict:
         db.close()
 
 
+# ── Node 2: seo_title ─────────────────────────────────────────────────────────
+
 def seo_title_node(state: UploadState) -> dict:
     print("[seo_title_node] starting...")
     from app.services.qwen_service import generate_response
     from app.services.model_router import get_model
+    from app.agents.research_agent import _profile_context
+
+    user_id = state.get("user_id")
+    creator_profile = _get_creator_profile(user_id) if user_id else {}
+
+    # Fetch performing keywords from Elastic for context
+    niche = creator_profile.get("creator_niche", "")
+    performing_keywords = _get_performing_keywords(user_id, niche) if user_id and niche else []
+    keywords_ctx = f"\nHigh-performing keywords for this channel: {', '.join(performing_keywords)}" if performing_keywords else ""
+
+    profile_ctx = _profile_context(creator_profile)
+    title_style = creator_profile.get("title_style", {})
+    title_style_str = title_style.get("style", "neutral") if isinstance(title_style, dict) else str(title_style)
 
     prompt = f"""
-You are a YouTube SEO expert.
+You are a YouTube SEO expert working for a specific creator.
+
+{profile_ctx}
+{keywords_ctx}
 
 Topic: {state["topic"]}
-
-Script excerpt:
-{(state.get("script") or "")[:1000]}
+Script excerpt: {(state.get("script") or "")[:800]}
+Creator's title style: {title_style_str}
 
 Generate ONE YouTube video title that:
 - Is under 70 characters
 - Contains the main keyword near the beginning
+- Matches the creator's title style exactly
 - Is compelling and click-worthy
-- Matches the content accurately
+- Uses high-performing keywords when natural
 
-Return ONLY the title text. No quotes, no explanation.
-"""
+Return ONLY the title text. No quotes, no explanation, no markdown.
+""".strip()
+
     model = get_model(state.get("plan", "normal"), "seo")
     title = generate_response(prompt, model).strip().strip('"').strip("'")
     print(f"[seo_title_node] title: {title}")
     return {"seo_title": title}
 
 
+# ── Node 3: seo_description ───────────────────────────────────────────────────
+
 def seo_description_node(state: UploadState) -> dict:
     print("[seo_description_node] starting...")
     from app.services.qwen_service import generate_response
     from app.services.model_router import get_model
+    from app.agents.research_agent import _profile_context
+    from app.agents.utils import load_prompt
 
-    prompt = f"""
+    user_id = state.get("user_id")
+    creator_profile = _get_creator_profile(user_id) if user_id else {}
+    profile_ctx = _profile_context(creator_profile)
+
+    desc_style = creator_profile.get("description_style", {})
+    desc_style_str = desc_style.get("style", "minimal") if isinstance(desc_style, dict) else str(desc_style)
+
+    audience = creator_profile.get("audience", {})
+    audience_type = audience.get("audience_type", "general viewers") if isinstance(audience, dict) else "general viewers"
+
+    main_topics = creator_profile.get("main_topics", [])
+
+    # Use seo.txt prompt for description
+    try:
+        prompt_template = load_prompt("seo.txt")
+        prompt = prompt_template.format(
+            profile_ctx=profile_ctx,
+            topic=state["topic"],
+            script=(state.get("script") or "")[:1500],
+            audience_type=audience_type,
+            main_topics=", ".join(main_topics) if main_topics else state["topic"],
+        )
+        # We only want the description section — add explicit instruction
+        prompt += "\n\nIMPORTANT: Return ONLY the Description section. No titles, no tags, no hashtags."
+    except Exception:
+        # Fallback prompt if template format fails
+        prompt = f"""
 You are a YouTube SEO expert.
 
+Creator profile: {profile_ctx}
 Topic: {state["topic"]}
 Title: {state.get("seo_title", "")}
+Description style: {desc_style_str}
+Script: {(state.get("script") or "")[:1500]}
 
-Script excerpt:
-{(state.get("script") or "")[:1500]}
-
-Write a YouTube video description that:
-- Opens with the most important information (first 2 lines visible before "Show more")
-- Is 150-200 words total
-- Naturally includes relevant keywords
-- Includes a call to action (like, subscribe, comment)
-- Has a section for timestamps (write placeholder: [TIMESTAMPS])
-- Has a section for links (write placeholder: [LINKS])
+Write a YouTube description (150-200 words):
+- First 2 lines visible before "Show more" — make them compelling
+- Match the creator's description style: {desc_style_str}
+- Include relevant keywords naturally
+- End with subscribe CTA
+- Include [TIMESTAMPS] and [LINKS] placeholders
 
 Return ONLY the description text.
-"""
+""".strip()
+
     model = get_model(state.get("plan", "normal"), "seo")
     description = generate_response(prompt, model).strip()
     print("[seo_description_node] done.")
     return {"seo_description": description}
 
+
+# ── Node 4: tags ──────────────────────────────────────────────────────────────
 
 def tags_node(state: UploadState) -> dict:
     print("[tags_node] starting...")
@@ -123,19 +201,45 @@ def tags_node(state: UploadState) -> dict:
     from app.services.model_router import get_model
     import json, re
 
+    user_id = state.get("user_id")
+    creator_profile = _get_creator_profile(user_id) if user_id else {}
+
+    niche = creator_profile.get("creator_niche", "")
+    main_topics = creator_profile.get("main_topics", [])
+    performing_keywords = _get_performing_keywords(user_id, niche) if user_id and niche else []
+
+    keywords_hint = ""
+    if performing_keywords:
+        keywords_hint = f"\nInclude these high-performing keywords in the tags where relevant: {', '.join(performing_keywords[:8])}"
+
+    audience = creator_profile.get("audience", {})
+    audience_level = audience.get("audience_level", "beginner") if isinstance(audience, dict) else "beginner"
+
     prompt = f"""
 You are a YouTube SEO expert.
 
-Topic: {state["topic"]}
-Title: {state.get("seo_title", "")}
+Creator niche: {niche or state["topic"]}
+Main topics: {", ".join(main_topics) if main_topics else state["topic"]}
+Audience level: {audience_level}
+Video topic: {state["topic"]}
+Video title: {state.get("seo_title", "")}
+{keywords_hint}
 
-Return ONLY a valid JSON object with exactly these fields:
+Return ONLY a valid JSON object:
 {{
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6", "tag7", "tag8", "tag9", "tag10", "tag11", "tag12", "tag13", "tag14", "tag15"],
   "hashtags": ["#hashtag1", "#hashtag2", "#hashtag3", "#hashtag4", "#hashtag5"],
   "category": "Education"
 }}
-"""
+
+Rules:
+- tags: exactly 15 strings, no # symbol, mix of broad, specific, and long-tail
+- hashtags: exactly 5, each starting with #
+- category: one YouTube category (Education / Science & Technology / Entertainment / Howto & Style)
+- Include channel niche topics in tags
+- Include audience-level terms (beginner, tutorial, for beginners) where relevant
+""".strip()
+
     model = get_model(state.get("plan", "normal"), "seo")
     raw   = generate_response(prompt, model)
 
@@ -149,8 +253,15 @@ Return ONLY a valid JSON object with exactly these fields:
         }
     except Exception as e:
         print(f"[tags_node] JSON parse failed: {e} — using fallback")
-        return {"seo_tags": [state["topic"]], "seo_hashtags": [], "seo_category": "Education"}
+        fallback_tags = [state["topic"]] + main_topics[:5] + performing_keywords[:5]
+        return {
+            "seo_tags":     fallback_tags[:15],
+            "seo_hashtags": [],
+            "seo_category": "Education",
+        }
 
+
+# ── Node 5: review_metadata (HITL) ───────────────────────────────────────────
 
 def review_metadata_node(state: UploadState) -> dict:
     print("[review_metadata_node] pausing for user review...")
@@ -170,90 +281,9 @@ def review_metadata_node(state: UploadState) -> dict:
     return {"seo_approved": approved}
 
 
-# ══════════════════════════════════════════════════════════════════
-# NEW NODE A: upload_thumbnail_node
-# ══════════════════════════════════════════════════════════════════
-
-def upload_thumbnail_node(state: UploadState) -> dict:
-    """
-    Upload the AI-generated thumbnail concept to YouTube.
-
-    The thumbnail field in state contains the text description/prompt
-    generated by the content workflow's ThumbnailAgent.
-
-    For actual image upload, the thumbnail must be a real image file.
-    If no thumbnail_file_path is provided in state, this node skips
-    gracefully and marks thumbnail_status as "skipped".
-
-    The node runs AFTER upload_video because YouTube requires a
-    video_id before a thumbnail can be attached.
-    """
-    print("[upload_thumbnail_node] starting...")
-
-    video_id        = state.get("youtube_video_id", "")
-    thumbnail_path  = state.get("thumbnail_file_path", "")  # optional path to image file
-    user_id         = state.get("user_id")
-
-    # If no video was uploaded yet, skip
-    if not video_id:
-        print("[upload_thumbnail_node] no video_id — skipping thumbnail upload")
-        return {"thumbnail_status": "skipped", "thumbnail_uploaded": False}
-
-    # If no thumbnail image file provided, skip gracefully
-    if not thumbnail_path:
-        print("[upload_thumbnail_node] no thumbnail_file_path — skipping thumbnail upload")
-        return {
-            "thumbnail_status":   "skipped",
-            "thumbnail_uploaded": False,
-            "thumbnail_error":    "No thumbnail_file_path provided",
-        }
-
-    from app.database import SessionLocal
-    from app.youtube_provider import get_youtube_provider
-
-    db = SessionLocal()
-    try:
-        provider = get_youtube_provider(user_id=user_id, db=db)
-        result   = provider.upload_thumbnail(
-            video_id=       video_id,
-            thumbnail_path= thumbnail_path,
-        )
-
-        print(f"[upload_thumbnail_node] result: {result}")
-        return {
-            "thumbnail_status":   result.get("thumbnail_status", "failed"),
-            "thumbnail_uploaded": result.get("thumbnail_status") == "uploaded",
-            "thumbnail_error":    result.get("error"),
-        }
-    except Exception as e:
-        print(f"[upload_thumbnail_node] error: {e}")
-        return {
-            "thumbnail_status":   "failed",
-            "thumbnail_uploaded": False,
-            "thumbnail_error":    str(e),
-        }
-    finally:
-        db.close()
-
-
-# ══════════════════════════════════════════════════════════════════
-# NEW NODE B: upload_video_node (real implementation)
-# ══════════════════════════════════════════════════════════════════
+# ── Node 6: upload_video ──────────────────────────────────────────────────────
 
 def upload_video_node(state: UploadState) -> dict:
-    """
-    Upload the video file to YouTube using the provider abstraction.
-
-    Requires:
-      - seo_approved == True (from review_metadata HITL)
-      - video_file_path in state (absolute path to .mp4 / .mov)
-      - user_id with a connected YouTube account
-
-    Returns youtube_video_id, youtube_video_url, upload_status, upload_error.
-
-    If video_file_path is missing, returns upload_status="metadata_ready"
-    so the demo flow still works without an actual video file.
-    """
     print("[upload_video_node] starting...")
 
     if not state.get("seo_approved"):
@@ -265,8 +295,6 @@ def upload_video_node(state: UploadState) -> dict:
     if not user_id:
         return {"upload_status": "failed", "upload_error": "user_id missing from state"}
 
-    # Demo mode: no video file provided — return metadata_ready so the
-    # rest of the workflow (thumbnail, save) still runs correctly
     if not video_file_path:
         print("[upload_video_node] no video_file_path — demo mode (metadata only)")
         return {
@@ -281,7 +309,6 @@ def upload_video_node(state: UploadState) -> dict:
     from app.youtube_provider import get_youtube_provider
     from app.youtube_provider.youtube_api_provider import CATEGORY_MAP
 
-    # Map category name → ID (default to Education = 27)
     category_name = state.get("seo_category", "Education")
     category_id   = CATEGORY_MAP.get(category_name, "27")
 
@@ -296,10 +323,7 @@ def upload_video_node(state: UploadState) -> dict:
             category_id=    category_id,
             privacy_status= state.get("privacy_status",  "private"),
         )
-
-        # Determine which provider was used
         provider_name = "mcp" if hasattr(provider, "mcp_url") else "api"
-
         print(f"[upload_video_node] result: {result.get('upload_status')}")
         return {
             "youtube_video_id":  result.get("youtube_video_id",  ""),
@@ -308,7 +332,6 @@ def upload_video_node(state: UploadState) -> dict:
             "upload_error":      result.get("error"),
             "provider_used":     provider_name,
         }
-
     except Exception as e:
         print(f"[upload_video_node] error: {e}")
         return {
@@ -322,33 +345,65 @@ def upload_video_node(state: UploadState) -> dict:
         db.close()
 
 
-# ══════════════════════════════════════════════════════════════════
-# NEW NODE C: save_upload_result_node
-# ══════════════════════════════════════════════════════════════════
+# ── Node 7: upload_thumbnail ──────────────────────────────────────────────────
+
+def upload_thumbnail_node(state: UploadState) -> dict:
+    print("[upload_thumbnail_node] starting...")
+
+    video_id       = state.get("youtube_video_id", "")
+    thumbnail_path = state.get("thumbnail_file_path", "")
+    user_id        = state.get("user_id")
+
+    if not video_id:
+        print("[upload_thumbnail_node] no video_id — skipping")
+        return {"thumbnail_status": "skipped", "thumbnail_uploaded": False}
+
+    if not thumbnail_path:
+        print("[upload_thumbnail_node] no thumbnail_file_path — skipping")
+        return {
+            "thumbnail_status":   "skipped",
+            "thumbnail_uploaded": False,
+            "thumbnail_error":    "No thumbnail_file_path provided",
+        }
+
+    from app.database import SessionLocal
+    from app.youtube_provider import get_youtube_provider
+
+    db = SessionLocal()
+    try:
+        provider = get_youtube_provider(user_id=user_id, db=db)
+        result   = provider.upload_thumbnail(video_id=video_id, thumbnail_path=thumbnail_path)
+        print(f"[upload_thumbnail_node] result: {result}")
+        return {
+            "thumbnail_status":   result.get("thumbnail_status", "failed"),
+            "thumbnail_uploaded": result.get("thumbnail_status") == "uploaded",
+            "thumbnail_error":    result.get("error"),
+        }
+    except Exception as e:
+        print(f"[upload_thumbnail_node] error: {e}")
+        return {"thumbnail_status": "failed", "thumbnail_uploaded": False, "thumbnail_error": str(e)}
+    finally:
+        db.close()
+
+
+# ── Node 8: save_upload_result ────────────────────────────────────────────────
 
 def save_upload_result_node(state: UploadState) -> dict:
-    """
-    Save the complete upload result to upload_records table.
-    Runs after both upload_thumbnail and upload_video complete.
-    Always runs — even if upload failed — so we have a full audit trail.
-    """
     print("[save_upload_result_node] saving upload result...")
 
     from app.database import SessionLocal
     from app.services.upload_service import (
-        create_upload_record,
-        complete_upload_record,
-        fail_upload_record,
-        cancel_upload_record,
+        create_upload_record, complete_upload_record,
+        fail_upload_record, cancel_upload_record,
     )
 
     upload_status = state.get("upload_status", "failed")
+    user_id       = state.get("user_id")
 
     db = SessionLocal()
     try:
-        # Create the record
         record = create_upload_record(
-            user_id=         state.get("user_id"),
+            user_id=         user_id,
             generation_id=   state.get("generation_id"),
             seo_title=       state.get("seo_title", ""),
             seo_description= state.get("seo_description", ""),
@@ -363,7 +418,7 @@ def save_upload_result_node(state: UploadState) -> dict:
 
         if upload_status in ("uploaded", "metadata_ready"):
             complete_upload_record(
-                record_id=        record.id,
+                record_id=         record.id,
                 youtube_video_id=  state.get("youtube_video_id",  ""),
                 youtube_video_url= state.get("youtube_video_url", ""),
                 thumbnail_status=  state.get("thumbnail_status",  "skipped"),
@@ -378,21 +433,44 @@ def save_upload_result_node(state: UploadState) -> dict:
             published_at = None
 
         print(f"[save_upload_result_node] record {record.id} saved as {upload_status}")
-        return {
-            "upload_record_id": record.id,
-            "published_at":     published_at,
-        }
 
     except Exception as e:
-        print(f"[save_upload_result_node] error saving record: {e}")
+        print(f"[save_upload_result_node] error: {e}")
         return {"upload_record_id": None, "published_at": None}
     finally:
         db.close()
 
+    # Update MongoDB content_piece with YouTube result (non-fatal)
+    if user_id and upload_status in ("uploaded", "metadata_ready"):
+        try:
+            from app.mcp.mongodb.tools import upsert_one
+            from datetime import datetime, timezone
+            upsert_one(
+                "content_pieces",
+                {"generation_id": state.get("generation_id")},
+                {"$set": {
+                    "youtube_video_id": state.get("youtube_video_id", ""),
+                    "upload_record_id": record.id,
+                    "seo.title":        state.get("seo_title", ""),
+                    "seo.tags":         state.get("seo_tags", []),
+                    "seo.category":     state.get("seo_category", ""),
+                    "updated_at":       datetime.now(timezone.utc),
+                }},
+            )
+            # Increment upload count in creator_memory
+            from app.memory import get_creator_memory_service
+            get_creator_memory_service().increment_uploads(user_id)
+            print(f"[save_upload_result_node] MongoDB content_piece updated")
+        except Exception as e:
+            print(f"[save_upload_result_node] MongoDB update warning (non-fatal): {e}")
 
-# ══════════════════════════════════════════════════════════════════
-# Conditional edges
-# ══════════════════════════════════════════════════════════════════
+    return {
+        "upload_record_id": record.id,
+        "published_at":     published_at,
+    }
+
+
+# ── Conditional edges ─────────────────────────────────────────────────────────
 
 def check_seo_approval(state: UploadState) -> str:
     return "approved" if state.get("seo_approved") is True else "rejected"
@@ -403,29 +481,21 @@ def handle_upload_rejection_node(state: UploadState) -> dict:
     return {"upload_status": "cancelled"}
 
 
-# ══════════════════════════════════════════════════════════════════
-# Graph construction
-# New graph: ... → review_metadata → upload_video → upload_thumbnail
-#            → save_upload_result → END
-# ══════════════════════════════════════════════════════════════════
+# ── Graph construction ────────────────────────────────────────────────────────
 
 def _build_upload_graph(checkpointer):
     builder = StateGraph(UploadState)
 
-    # Existing nodes
     builder.add_node("load_generation",         load_generation_node)
     builder.add_node("seo_title",               seo_title_node)
     builder.add_node("seo_description",         seo_description_node)
     builder.add_node("tags",                    tags_node)
     builder.add_node("review_metadata",         review_metadata_node)
     builder.add_node("handle_upload_rejection", handle_upload_rejection_node)
-
-    # New nodes
     builder.add_node("upload_video",            upload_video_node)
     builder.add_node("upload_thumbnail",        upload_thumbnail_node)
     builder.add_node("save_upload_result",      save_upload_result_node)
 
-    # Edges — existing
     builder.set_entry_point("load_generation")
     builder.add_edge("load_generation", "seo_title")
     builder.add_edge("seo_title",       "seo_description")
@@ -438,35 +508,26 @@ def _build_upload_graph(checkpointer):
         {"approved": "upload_video", "rejected": "handle_upload_rejection"},
     )
 
-    # Edges — new
-    # upload_video first (need video_id before thumbnail)
-    builder.add_edge("upload_video",       "upload_thumbnail")
-    builder.add_edge("upload_thumbnail",   "save_upload_result")
-    builder.add_edge("save_upload_result", END)
-
-    # Rejection path also saves a record
+    builder.add_edge("upload_video",            "upload_thumbnail")
+    builder.add_edge("upload_thumbnail",        "save_upload_result")
+    builder.add_edge("save_upload_result",      END)
     builder.add_edge("handle_upload_rejection", "save_upload_result")
 
     return builder.compile(checkpointer=checkpointer)
 
 
-# ── Singleton — built once after FastAPI lifespan startup ──────
+# ── Singleton ─────────────────────────────────────────────────────────────────
 
 import sys as _sys
 _MODULE = _sys.modules[__name__]
 
-upload_graph = None   # set by init_upload_graph() in main.py
+upload_graph = None
 
 
 def init_upload_graph():
-    """
-    Build and cache the upload workflow graph.
-    Called once from FastAPI lifespan startup AFTER checkpointer is ready.
-    """
     if not hasattr(_MODULE, "_upload_graph") or _MODULE._upload_graph is None:
         _MODULE._upload_graph = _build_upload_graph(get_checkpointer())
         print("[upload_workflow] upload graph compiled")
-
     import app.graph.upload_workflow as _self
     _self.upload_graph = _MODULE._upload_graph
     return _MODULE._upload_graph

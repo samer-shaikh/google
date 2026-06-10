@@ -1,6 +1,49 @@
 from app.services.qwen_service import generate_response
 from app.services.model_router import get_model
 from app.agents.utils import load_prompt
+import asyncio
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def _try_mcp_topic_history(user_id: int, existing_history: list[str]) -> list[str]:
+    """
+    Attempt to enrich topic history via MongoDB MCP server.
+    Falls back to the already-injected topic_history arg if MCP is unavailable.
+    Never raises — always returns a list.
+    """
+    if not user_id:
+        return existing_history
+    try:
+        from app.mcp.mongodb.mcp_runner import call_mcp_tool
+        import concurrent.futures
+
+        async def _fetch():
+            docs = await call_mcp_tool("find", {
+                "collection": "research_sessions",
+                "filter": {"user_id": user_id},
+                "sort": {"created_at": -1},
+                "limit": 15,
+                "projection": {"topic": 1},
+            })
+            if docs and isinstance(docs, list):
+                return [d["topic"] for d in docs if "topic" in d]
+            return None
+
+        # Run in a fresh thread with its own event loop to avoid
+        # deadlocking inside LangGraph's running async loop
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, _fetch())
+            mcp_topics = future.result(timeout=8.0)
+
+        if mcp_topics:
+            merged = list(dict.fromkeys(mcp_topics + existing_history))
+            log.info(f"[research_agent] MCP enriched topic history: {len(merged)} topics")
+            return merged
+    except Exception as e:
+        log.debug(f"[research_agent] MCP topic history fetch skipped: {e}")
+    return existing_history
 
 
 def _profile_context(creator_profile: dict) -> str:
@@ -62,8 +105,11 @@ def research_agent(
       - topic_history: injected to prevent researching already-covered topics
       - content_strengths / viral_patterns now populated from MongoDB memory
     """
+    user_id = creator_profile.get("user_id") if creator_profile else None
+    enriched_history = _try_mcp_topic_history(user_id, topic_history)
+
     profile_ctx      = _profile_context(creator_profile)
-    topic_hist_ctx   = _topic_history_context(topic_history)
+    topic_hist_ctx   = _topic_history_context(enriched_history)
 
     prompt_template  = load_prompt("research.txt")
 

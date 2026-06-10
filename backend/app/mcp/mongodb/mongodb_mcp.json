@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "mongodb": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mongodb-mcp-server@latest"
+      ],
+      "env": {
+        "MONGODB_URI": "api-key",
+        "MDB_MCP_LOG_LEVEL": "error"
+      }
+    }
+  }
+}
