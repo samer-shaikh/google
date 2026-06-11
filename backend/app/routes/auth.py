@@ -58,6 +58,7 @@ async def auth_callback(
     db: Session = Depends(get_db)
 ):
     from fastapi.responses import HTMLResponse
+    print("CALLBACK REACHED")
 
     token = await oauth.google.authorize_access_token(request)
     user_info = token.get("userinfo")
@@ -88,35 +89,63 @@ async def auth_callback(
 
     # Return an HTML page that sends the tokens to the parent window via postMessage
     # and closes the popup — the frontend listener in login/page.tsx picks this up
+    # html = f"""
+    # <!DOCTYPE html>
+    # <html>
+    # <head><title>Authenticating...</title></head>
+    # <body>
+    #   <script>
+    #     try {{
+    #       window.opener.postMessage(
+    #         {{
+    #           type: "GOOGLE_AUTH_SUCCESS",
+    #           access_token: "{access_token}",
+    #           refresh_token: "{refresh_token}",
+    #           user: {{
+    #             id: {existing_user.id},
+    #             email: "{existing_user.email}",
+    #             name: "{existing_user.name}"
+    #           }}
+    #         }},
+    #         "{FRONTEND_URL}"
+    #       );
+    #     }} catch(e) {{
+    #       console.error("postMessage failed:", e);
+    #     }}
+    #     window.close();
+    #   </script>
+    #   <p>Authentication successful! This window will close automatically.</p>
+    # </body>
+    # </html>
+    # """
     html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head><title>Authenticating...</title></head>
-    <body>
-      <script>
-        try {{
-          window.opener.postMessage(
-            {{
-              type: "GOOGLE_AUTH_SUCCESS",
-              access_token: "{access_token}",
-              refresh_token: "{refresh_token}",
-              user: {{
+        <!DOCTYPE html>
+        <html>
+        <body>
+        <script>
+        window.opener.postMessage(
+        {{
+            type: "GOOGLE_AUTH_SUCCESS",
+            access_token: "{access_token}",
+            refresh_token: "{refresh_token}",
+            user: {{
                 id: {existing_user.id},
                 email: "{existing_user.email}",
                 name: "{existing_user.name}"
-              }}
-            }},
-            "{FRONTEND_URL}"
-          );
-        }} catch(e) {{
-          console.error("postMessage failed:", e);
-        }}
+            }}
+        }},
+        "*"
+        );
+
         window.close();
-      </script>
-      <p>Authentication successful! This window will close automatically.</p>
-    </body>
-    </html>
-    """
+        </script>
+        </body>
+        </html>
+        """
+    
+    print("ACCESS TOKEN:", access_token)
+    print("USER:", existing_user.email)
+    print("NAME:", existing_user.name)
     return HTMLResponse(content=html)
 #==================================== normal login =========================================
 

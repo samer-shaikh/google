@@ -4,9 +4,6 @@ from googleapiclient.discovery import build
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import os
-import base64
-import hashlib
-import secrets
 import requests as http_requests
 
 from app.database import get_db
@@ -26,16 +23,6 @@ GOOGLE_AUTH_URI  = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
-def _make_pkce_pair() -> tuple[str, str]:
-    """
-    Generate a PKCE code_verifier and its SHA-256 code_challenge.
-    Required when Google Cloud OAuth client has PKCE enforced.
-    """
-    code_verifier = secrets.token_urlsafe(96)  # 128 chars, URL-safe
-    digest = hashlib.sha256(code_verifier.encode()).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-    return code_verifier, code_challenge
-
 
 @router.get("/connect")
 def connect_youtube(
@@ -45,11 +32,8 @@ def connect_youtube(
     client_id    = os.getenv("GOOGLE_CLIENT_ID")
     redirect_uri = os.getenv("YOUTUBE_REDIRECT_URI")
 
-    # Generate PKCE pair
-    code_verifier, code_challenge = _make_pkce_pair()
 
     # Store verifier in session — needed for the callback token exchange
-    request.session["youtube_code_verifier"] = code_verifier
     request.session["youtube_user_id"]       = current_user.id
 
     # Build the auth URL manually so we control every parameter
@@ -62,8 +46,6 @@ def connect_youtube(
         f"&access_type=offline"
         f"&prompt=consent"
         f"&state={current_user.id}"
-        f"&code_challenge={code_challenge}"
-        f"&code_challenge_method=S256"
     )
     auth_url = GOOGLE_AUTH_URI + params
 
@@ -87,14 +69,7 @@ def youtube_callback(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    # Retrieve the PKCE verifier we stored in /connect
-    code_verifier = request.session.get("youtube_code_verifier")
-    if not code_verifier:
-        raise HTTPException(
-            status_code=400,
-            detail="PKCE verifier missing from session. "
-                   "Please start the flow again from /youtube/connect.",
-        )
+
 
     client_id     = os.getenv("GOOGLE_CLIENT_ID")
     client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
@@ -109,7 +84,6 @@ def youtube_callback(
             "client_secret": client_secret,
             "redirect_uri":  redirect_uri,
             "grant_type":    "authorization_code",
-            "code_verifier": code_verifier,   # ← PKCE verifier
         },
     )
 
@@ -133,7 +107,6 @@ def youtube_callback(
     )
 
     # Clean up session
-    request.session.pop("youtube_code_verifier", None)
     request.session.pop("youtube_user_id", None)
 
     # Fetch channel info
