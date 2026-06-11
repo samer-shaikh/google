@@ -21,7 +21,7 @@ import os
 
 
 
-
+FRONTEND_URL = os.getenv("FRONTEND_URL")
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -106,7 +106,7 @@ async def auth_callback(
                 name: "{existing_user.name}"
               }}
             }},
-            "http://localhost:3000"
+            "{FRONTEND_URL}"
           );
         }} catch(e) {{
           console.error("postMessage failed:", e);
