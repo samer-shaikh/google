@@ -91,7 +91,7 @@ def load_generation_node(state: UploadState) -> dict:
 
 def seo_title_node(state: UploadState) -> dict:
     print("[seo_title_node] starting...")
-    from app.services.qwen_service import generate_response
+    from app.services.llm_provider import generate_response
     from app.services.model_router import get_model
     from app.agents.research_agent import _profile_context
 
@@ -137,7 +137,7 @@ Return ONLY the title text. No quotes, no explanation, no markdown.
 
 def seo_description_node(state: UploadState) -> dict:
     print("[seo_description_node] starting...")
-    from app.services.qwen_service import generate_response
+    from app.services.llm_provider import generate_response
     from app.services.model_router import get_model
     from app.agents.research_agent import _profile_context
     from app.agents.utils import load_prompt
@@ -197,7 +197,7 @@ Return ONLY the description text.
 
 def tags_node(state: UploadState) -> dict:
     print("[tags_node] starting...")
-    from app.services.qwen_service import generate_response
+    from app.services.llm_provider import generate_response
     from app.services.model_router import get_model
     import json, re
 
@@ -396,11 +396,14 @@ def save_upload_result_node(state: UploadState) -> dict:
         create_upload_record, complete_upload_record,
         fail_upload_record, cancel_upload_record,
     )
+    # Import datetime at top of function to avoid shadowing issues
+    from datetime import datetime as _datetime, timezone as _timezone
 
     upload_status = state.get("upload_status", "failed")
     user_id       = state.get("user_id")
 
     db = SessionLocal()
+    record = None
     try:
         record = create_upload_record(
             user_id=         user_id,
@@ -414,7 +417,7 @@ def save_upload_result_node(state: UploadState) -> dict:
             db=db,
         )
 
-        published_at = datetime.now(timezone.utc).isoformat()
+        published_at = _datetime.now(_timezone.utc).isoformat()
 
         if upload_status in ("uploaded", "metadata_ready"):
             complete_upload_record(
@@ -441,11 +444,23 @@ def save_upload_result_node(state: UploadState) -> dict:
     finally:
         db.close()
 
+    # Auto-delete uploaded files from disk after successful upload to save space
+    if upload_status in ("uploaded", "metadata_ready"):
+        for path_key in ("video_file_path", "thumbnail_file_path"):
+            file_path = state.get(path_key, "")
+            if file_path:
+                try:
+                    import os
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"[save_upload_result_node] deleted temp file: {file_path}")
+                except Exception as cleanup_err:
+                    print(f"[save_upload_result_node] cleanup warning (non-fatal): {cleanup_err}")
+
     # Update MongoDB content_piece with YouTube result (non-fatal)
     if user_id and upload_status == "uploaded":
         try:
             from app.mcp.mongodb.tools import upsert_one
-            from datetime import datetime, timezone
             upsert_one(
                 "content_pieces",
                 {"generation_id": state.get("generation_id")},
@@ -455,7 +470,7 @@ def save_upload_result_node(state: UploadState) -> dict:
                     "seo.title":        state.get("seo_title", ""),
                     "seo.tags":         state.get("seo_tags", []),
                     "seo.category":     state.get("seo_category", ""),
-                    "updated_at":       datetime.now(timezone.utc),
+                    "updated_at":       _datetime.now(_timezone.utc),
                 }},
             )
             # Increment upload count in creator_memory
@@ -466,7 +481,7 @@ def save_upload_result_node(state: UploadState) -> dict:
             print(f"[save_upload_result_node] MongoDB update warning (non-fatal): {e}")
 
     return {
-        "upload_record_id": record.id,
+        "upload_record_id": record.id if record else None,
         "published_at":     published_at,
     }
 

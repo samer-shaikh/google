@@ -76,6 +76,14 @@ class UploadStartRequest(BaseModel):
     # Optional: absolute path to thumbnail image file (.jpg/.png, max 2MB)
     thumbnail_file_path: Optional[str] = None
 
+class UploadOnlyRequest(BaseModel):
+    topic: Optional[str] = "Uploaded Video"
+    description: Optional[str] = ""   # short description the user provides about video content
+    privacy_status: str = "private"
+    plan: Plan = Plan.normal
+    video_file_path: Optional[str] = None
+    thumbnail_file_path: Optional[str] = None
+
 class UploadReviewRequest(BaseModel):
     thread_id: str
     approved: bool
@@ -321,6 +329,44 @@ def get_generation_detail(
 # load_generation → seo_title → seo_description → tags →
 # review_metadata (HITL) → upload_video → END
 # ══════════════════════════════════════════════════════════════════
+
+@router.post("/upload/create-generation")
+def create_upload_only_generation(
+    data: UploadOnlyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Upload-only flow: user already has a video and skips research/ideas/script.
+    Creates a Generation record with status='completed' so the upload workflow
+    can proceed immediately without requiring a full content generation run.
+    """
+    topic = (data.topic or "Uploaded Video").strip() or "Uploaded Video"
+    description = (data.description or "").strip()
+
+    from app.models.generation import Generation
+
+    # Store the user's description in the script field so the SEO nodes
+    # can use it to generate an accurate title/description/tags even
+    # without a full AI-generated script.
+    gen = Generation(
+        user_id=current_user.id,
+        topic=topic,
+        plan=data.plan.value,
+        status="completed",  # mark completed so upload workflow accepts it
+        script=description,  # user's short description acts as context for SEO
+        thumbnail="",
+    )
+    db.add(gen)
+    db.commit()
+    db.refresh(gen)
+
+    return {
+        "generation_id": gen.id,
+        "topic":         gen.topic,
+        "status":        gen.status,
+    }
+
 
 @router.post("/upload/start")
 def start_upload_workflow(

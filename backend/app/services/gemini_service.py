@@ -29,8 +29,9 @@ def _get_llm() -> ChatGoogleGenerativeAI:
                 "Get a free key at https://aistudio.google.com/apikey "
                 "and add it to your .env file."
             )
+        model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")  # 1.5-flash has higher free quota
         _llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model=model_name,
             google_api_key=api_key,
             temperature=0.7,
             max_output_tokens=8192,
