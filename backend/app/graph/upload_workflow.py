@@ -5,12 +5,6 @@ Graph:
   load_generation → seo_title → seo_description → tags →
   review_metadata (HITL) → upload_video → upload_thumbnail →
   save_upload_result → END
-
-SEO nodes now:
-  - use the rich seo.txt prompt template
-  - inject creator profile context (audience, niche, title style)
-  - read keyword_performance from Elastic when available
-  - save SEO metadata to MongoDB content_pieces after successful upload
 """
 from langgraph.graph import StateGraph, END
 from langgraph.types import interrupt
@@ -20,26 +14,17 @@ from app.graph.state import UploadState
 from app.graph.checkpointer import get_checkpointer
 
 
-# ── Helper: load creator profile for upload SEO nodes ────────────────────────
+# ── Helper: load creator profile ─────────────────────────────────────────────
 
 def _get_creator_profile(user_id: int) -> dict:
-    """
-    Load creator profile from MongoDB memory for SEO personalization.
-    Falls back to empty dict — SEO nodes degrade gracefully.
-    """
     try:
         from app.memory import get_creator_memory_service
-        ctx = get_creator_memory_service().get_context_for_agents(user_id)
-        return ctx
+        return get_creator_memory_service().get_context_for_agents(user_id)
     except Exception:
         return {}
 
 
 def _get_performing_keywords(user_id: int, niche: str) -> list[str]:
-    """
-    Fetch best-performing keywords from Elastic for SEO enrichment.
-    Returns [] if Elastic not configured.
-    """
     try:
         from app.mcp.elastic.tools import search_performing_keywords
         results = search_performing_keywords(user_id=user_id, niche=niche, limit=10)
@@ -98,7 +83,6 @@ def seo_title_node(state: UploadState) -> dict:
     user_id = state.get("user_id")
     creator_profile = _get_creator_profile(user_id) if user_id else {}
 
-    # Fetch performing keywords from Elastic for context
     niche = creator_profile.get("creator_niche", "")
     performing_keywords = _get_performing_keywords(user_id, niche) if user_id and niche else []
     keywords_ctx = f"\nHigh-performing keywords for this channel: {', '.join(performing_keywords)}" if performing_keywords else ""
@@ -122,7 +106,6 @@ Generate ONE YouTube video title that:
 - Contains the main keyword near the beginning
 - Matches the creator's title style exactly
 - Is compelling and click-worthy
-- Uses high-performing keywords when natural
 
 Return ONLY the title text. No quotes, no explanation, no markdown.
 """.strip()
@@ -151,10 +134,8 @@ def seo_description_node(state: UploadState) -> dict:
 
     audience = creator_profile.get("audience", {})
     audience_type = audience.get("audience_type", "general viewers") if isinstance(audience, dict) else "general viewers"
-
     main_topics = creator_profile.get("main_topics", [])
 
-    # Use seo.txt prompt for description
     try:
         prompt_template = load_prompt("seo.txt")
         prompt = prompt_template.format(
@@ -164,27 +145,17 @@ def seo_description_node(state: UploadState) -> dict:
             audience_type=audience_type,
             main_topics=", ".join(main_topics) if main_topics else state["topic"],
         )
-        # We only want the description section — add explicit instruction
         prompt += "\n\nIMPORTANT: Return ONLY the Description section. No titles, no tags, no hashtags."
     except Exception:
-        # Fallback prompt if template format fails
         prompt = f"""
 You are a YouTube SEO expert.
 
-Creator profile: {profile_ctx}
 Topic: {state["topic"]}
 Title: {state.get("seo_title", "")}
 Description style: {desc_style_str}
 Script: {(state.get("script") or "")[:1500]}
 
-Write a YouTube description (150-200 words):
-- First 2 lines visible before "Show more" — make them compelling
-- Match the creator's description style: {desc_style_str}
-- Include relevant keywords naturally
-- End with subscribe CTA
-- Include [TIMESTAMPS] and [LINKS] placeholders
-
-Return ONLY the description text.
+Write a YouTube description (150-200 words). Return ONLY the description text.
 """.strip()
 
     model = get_model(state.get("plan", "normal"), "seo")
@@ -233,11 +204,9 @@ Return ONLY a valid JSON object:
 }}
 
 Rules:
-- tags: exactly 15 strings, no # symbol, mix of broad, specific, and long-tail
+- tags: exactly 15 strings, no # symbol
 - hashtags: exactly 5, each starting with #
 - category: one YouTube category (Education / Science & Technology / Entertainment / Howto & Style)
-- Include channel niche topics in tags
-- Include audience-level terms (beginner, tutorial, for beginners) where relevant
 """.strip()
 
     model = get_model(state.get("plan", "normal"), "seo")
@@ -317,11 +286,11 @@ def upload_video_node(state: UploadState) -> dict:
         provider = get_youtube_provider(user_id=user_id, db=db)
         result   = provider.upload_video(
             video_file_path=video_file_path,
-            title=          state.get("seo_title",       state.get("topic", ""))[:100],
+            title=          state.get("seo_title", state.get("topic", ""))[:100],
             description=    state.get("seo_description", ""),
-            tags=           state.get("seo_tags",        []),
+            tags=           state.get("seo_tags", []),
             category_id=    category_id,
-            privacy_status= state.get("privacy_status",  "private"),
+            privacy_status= state.get("privacy_status", "private"),
         )
         provider_name = "mcp" if hasattr(provider, "mcp_url") else "api"
         print(f"[upload_video_node] result: {result.get('upload_status')}")
@@ -373,15 +342,30 @@ def upload_thumbnail_node(state: UploadState) -> dict:
     try:
         provider = get_youtube_provider(user_id=user_id, db=db)
         result   = provider.upload_thumbnail(video_id=video_id, thumbnail_path=thumbnail_path)
-        print(f"[upload_thumbnail_node] result: {result}")
+        status   = result.get("thumbnail_status", "failed")
+
+        print(f"[upload_thumbnail_node] result: {status}")
+
+        # ── "skipped_unverified" is a SOFT success ──────────────────────────
+        # The video was already uploaded. Treat this as non-fatal so
+        # save_upload_result_node still records the upload as successful.
+        is_success = status in ("uploaded", "skipped_unverified", "skipped")
+
         return {
-            "thumbnail_status":   result.get("thumbnail_status", "failed"),
-            "thumbnail_uploaded": result.get("thumbnail_status") == "uploaded",
+            "thumbnail_status":   status,
+            "thumbnail_uploaded": status == "uploaded",
             "thumbnail_error":    result.get("error"),
+            # Preserve upload_status from video node if thumbnail just skipped
+            **({"upload_status": "uploaded"} if is_success and state.get("upload_status") == "uploaded" else {}),
         }
     except Exception as e:
-        print(f"[upload_thumbnail_node] error: {e}")
-        return {"thumbnail_status": "failed", "thumbnail_uploaded": False, "thumbnail_error": str(e)}
+        # Never let thumbnail errors kill the upload record
+        print(f"[upload_thumbnail_node] error (non-fatal): {e}")
+        return {
+            "thumbnail_status":   "failed",
+            "thumbnail_uploaded": False,
+            "thumbnail_error":    str(e),
+        }
     finally:
         db.close()
 
@@ -396,7 +380,6 @@ def save_upload_result_node(state: UploadState) -> dict:
         create_upload_record, complete_upload_record,
         fail_upload_record, cancel_upload_record,
     )
-    # Import datetime at top of function to avoid shadowing issues
     from datetime import datetime as _datetime, timezone as _timezone
 
     upload_status = state.get("upload_status", "failed")
@@ -444,7 +427,7 @@ def save_upload_result_node(state: UploadState) -> dict:
     finally:
         db.close()
 
-    # Auto-delete uploaded files from disk after successful upload to save space
+    # Auto-delete temp files after successful upload
     if upload_status in ("uploaded", "metadata_ready"):
         for path_key in ("video_file_path", "thumbnail_file_path"):
             file_path = state.get(path_key, "")
@@ -457,7 +440,6 @@ def save_upload_result_node(state: UploadState) -> dict:
                 except Exception as cleanup_err:
                     print(f"[save_upload_result_node] cleanup warning (non-fatal): {cleanup_err}")
 
-    # Update MongoDB content_piece with YouTube result (non-fatal)
     if user_id and upload_status == "uploaded":
         try:
             from app.mcp.mongodb.tools import upsert_one
@@ -473,7 +455,6 @@ def save_upload_result_node(state: UploadState) -> dict:
                     "updated_at":       _datetime.now(_timezone.utc),
                 }},
             )
-            # Increment upload count in creator_memory
             from app.memory import get_creator_memory_service
             get_creator_memory_service().increment_uploads(user_id)
             print(f"[save_upload_result_node] MongoDB content_piece updated")

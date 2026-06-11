@@ -93,7 +93,6 @@ class YouTubeAPIProvider(YouTubeProviderBase):
                 self._account.access_token = self._credentials.token
                 self._account.token_expiry = self._credentials.expiry
                 self.db.commit()
-                # Rebuild the API client with the refreshed credentials
                 self._youtube = build(
                     "youtube", "v3",
                     credentials=self._credentials,
@@ -124,19 +123,6 @@ class YouTubeAPIProvider(YouTubeProviderBase):
         category_id: str,
         privacy_status: str,
     ) -> dict:
-        """
-        Upload a video file to YouTube using resumable upload.
-
-        Args:
-            video_file_path: Absolute path to the .mp4 / .mov file
-            title:           Video title (max 100 chars)
-            description:     Video description
-            tags:            List of tag strings
-            category_id:     YouTube category ID string (e.g. "27" for Education)
-            privacy_status:  "private" | "unlisted" | "public"
-
-        Returns dict with youtube_video_id, youtube_video_url, upload_status, error
-        """
         self._ensure_fresh()
 
         if not os.path.exists(video_file_path):
@@ -164,7 +150,7 @@ class YouTubeAPIProvider(YouTubeProviderBase):
             video_file_path,
             mimetype="video/*",
             resumable=True,
-            chunksize=1024 * 1024 * 5,  # 5 MB chunks
+            chunksize=1024 * 1024 * 5,
         )
 
         last_error = None
@@ -196,7 +182,6 @@ class YouTubeAPIProvider(YouTubeProviderBase):
             except HttpError as e:
                 last_error = str(e)
                 print(f"[YouTubeAPIProvider] HTTP error on attempt {attempt}: {e}")
-                # 4xx errors are not retryable (bad request, quota exceeded)
                 if e.resp.status in (400, 401, 403, 404):
                     break
                 if attempt < MAX_RETRIES:
@@ -223,13 +208,16 @@ class YouTubeAPIProvider(YouTubeProviderBase):
         thumbnail_path: str,
     ) -> dict:
         """
-        Upload a thumbnail image for a video that has already been uploaded.
+        Upload a thumbnail image for an already-uploaded video.
 
-        Args:
-            video_id:        YouTube video ID (e.g. "dQw4w9WgXcQ")
-            thumbnail_path:  Absolute path to .jpg / .png file (max 2MB)
+        Returns a result dict with thumbnail_status and error.
+        NEVER raises — always returns gracefully so the video upload is preserved.
 
-        Returns dict with thumbnail_status, error
+        thumbnail_status values:
+          "uploaded"            — success
+          "skipped"             — no video_id or no thumbnail_path
+          "skipped_unverified"  — 403: channel not verified for custom thumbnails
+          "failed"              — other error
         """
         self._ensure_fresh()
 
@@ -238,11 +226,10 @@ class YouTubeAPIProvider(YouTubeProviderBase):
 
         if not thumbnail_path or not os.path.exists(thumbnail_path):
             return {
-                "thumbnail_status": "failed",
+                "thumbnail_status": "skipped",
                 "error": f"Thumbnail file not found: {thumbnail_path}",
             }
 
-        # Detect mime type from extension
         ext  = os.path.splitext(thumbnail_path)[1].lower()
         mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
 
@@ -260,8 +247,27 @@ class YouTubeAPIProvider(YouTubeProviderBase):
             except HttpError as e:
                 last_error = str(e)
                 print(f"[YouTubeAPIProvider] thumbnail HTTP error attempt {attempt}: {e}")
-                if e.resp.status in (400, 401, 403, 404):
+
+                # ── 403: channel not verified for custom thumbnails ──────────
+                # This is a YouTube policy requirement, not a code bug.
+                # Return a soft skip — the video was already uploaded successfully.
+                if e.resp.status == 403:
+                    print(
+                        "[YouTubeAPIProvider] thumbnail 403 — channel not verified. "
+                        "Skipping thumbnail gracefully (video already uploaded)."
+                    )
+                    return {
+                        "thumbnail_status": "skipped_unverified",
+                        "error": (
+                            "Custom thumbnails require a verified YouTube channel. "
+                            "Verify at youtube.com/verify — your video was uploaded successfully."
+                        ),
+                    }
+
+                # 400/401/404 — not retryable
+                if e.resp.status in (400, 401, 404):
                     break
+
                 if attempt < MAX_RETRIES:
                     time.sleep(RETRY_DELAY * attempt)
 
