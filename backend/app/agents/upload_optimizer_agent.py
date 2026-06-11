@@ -1,7 +1,8 @@
-from app.services.qwen_service import generate_response
+from app.services.llm_provider import generate_response
 from app.services.model_router import get_model
 
-def upload_optimizer_agent(topic: str, script: str, plan: str='normal'):
+
+def upload_optimizer_agent(topic: str, script: str, plan: str = "normal"):
 
     prompt = f"""
     You are a YouTube SEO expert.
@@ -26,7 +27,5 @@ def upload_optimizer_agent(topic: str, script: str, plan: str='normal'):
     5 hashtags
     """
 
-
-    model = get_model(plan,'upload_optimizer')
-
-    return generate_response(prompt,model)
+    model = get_model(plan, "upload_optimizer")
+    return generate_response(prompt, model)

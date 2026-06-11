@@ -17,7 +17,7 @@ Total: 10. Threshold to pass: 7.
 import json
 import re
 import logging
-from app.services.qwen_service import generate_response
+from app.services.llm_provider import generate_response
 from app.services.model_router import get_model
 
 log = logging.getLogger(__name__)
@@ -82,25 +82,8 @@ def critic_agent(
 ) -> dict:
     """
     Review a generated script and return a structured quality report.
-
-    Returns:
-        {
-            "passed": bool,
-            "total_score": int,
-            "critique": str,
-            "strongest_element": str,
-            "weakest_element": str,
-            "hook_strength": int,
-            "structure_clarity": int,
-            "audience_alignment": int,
-            "originality": int,
-            "length_appropriateness": int,
-        }
-
-    Always returns a dict — never raises. On LLM/parse failure, returns
-    a default pass=True so the workflow is never stuck.
+    Always returns a dict — never raises.
     """
-    # If max retries reached, force pass to avoid infinite loops
     if revision_count >= MAX_RETRIES:
         log.info(f"[critic_agent] max retries ({MAX_RETRIES}) reached — forcing pass")
         return {
@@ -125,12 +108,11 @@ def critic_agent(
     )
 
     try:
-        model = get_model(plan, "research")  # use fast model for critic
+        model = get_model(plan, "research")  # fast model is fine for critic
         raw = generate_response(prompt, model)
         cleaned = re.sub(r"```[a-z]*", "", raw).strip().strip("`").strip()
         result = json.loads(cleaned)
 
-        # Ensure required keys exist with safe defaults
         result.setdefault("passed", result.get("total_score", 0) >= PASS_THRESHOLD)
         result.setdefault("total_score", 0)
         result.setdefault("critique", "No critique provided.")

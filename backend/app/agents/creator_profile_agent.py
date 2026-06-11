@@ -1,9 +1,9 @@
 """
 creator_profile_agent.py
 
-Single authoritative implementation.
-After saving to PostgreSQL, also syncs to MongoDB creator_memory
-so that content_strengths and viral_patterns are persisted for agents.
+Analyses YouTube channel data with the LLM and returns a validated profile.
+After saving to PostgreSQL, syncs to MongoDB creator_memory so that
+content_strengths and viral_patterns are persisted for downstream agents.
 """
 import json
 import re
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.models.youtube_video import YouTubeVideo
 from app.models.creator_profile import CreatorProfile, CreatorProfileOutput
-from app.services.qwen_service import generate_response
+from app.services.llm_provider import generate_response
 from app.services.model_router import get_model
 
 PROMPT_VERSION = "v1"
@@ -167,7 +167,6 @@ class CreatorProfileAgent:
         db.commit()
         db.refresh(profile)
 
-        # Mark processed videos as analyzed
         db.query(YouTubeVideo).filter(
             YouTubeVideo.user_id == user_id,
             YouTubeVideo.is_analyzed == False,  # noqa: E712
@@ -183,30 +182,22 @@ class CreatorProfileAgent:
         channel_name: str,
         profile_output: CreatorProfileOutput,
     ) -> None:
-        """
-        After saving to PostgreSQL, sync the full LLM output to MongoDB
-        creator_memory so content_strengths and viral_patterns are persisted.
-
-        This is the fix that makes viral_patterns non-empty for the first time.
-        """
         try:
             from app.memory import get_creator_memory_service
             svc = get_creator_memory_service()
             profile_dict = profile_output.model_dump()
 
-            # Build the full profile data dict in the format memory service expects
             profile_data_for_memory = {
-                "creator_niche":          profile_dict["creator_niche"],
-                "main_topics":            profile_dict["main_topics"],
-                "topics":                 profile_dict["main_topics"],
-                "audience_type":          profile_dict["audience_type"],
-                "audience_level":         profile_dict["audience_level"],
-                "title_style":            profile_dict["title_style"],
-                "description_style":      profile_dict["description_style"],
-                # THE KEY FIX: these are now written to MongoDB from real LLM output
-                "content_strengths":      profile_dict["content_strengths"],
-                "viral_patterns":         profile_dict["viral_patterns"],
-                "recommended_video_types":profile_dict["recommended_video_types"],
+                "creator_niche":           profile_dict["creator_niche"],
+                "main_topics":             profile_dict["main_topics"],
+                "topics":                  profile_dict["main_topics"],
+                "audience_type":           profile_dict["audience_type"],
+                "audience_level":          profile_dict["audience_level"],
+                "title_style":             profile_dict["title_style"],
+                "description_style":       profile_dict["description_style"],
+                "content_strengths":       profile_dict["content_strengths"],
+                "viral_patterns":          profile_dict["viral_patterns"],
+                "recommended_video_types": profile_dict["recommended_video_types"],
             }
 
             svc.sync_from_profile(
@@ -221,17 +212,9 @@ class CreatorProfileAgent:
                 f"content_strengths={len(profile_dict['content_strengths'])}"
             )
         except Exception as e:
-            # Non-fatal — PostgreSQL is the authoritative store
             print(f"[CreatorProfileAgent] MongoDB sync warning (non-fatal): {e}")
 
     def run(self, user_id: int, channel_info: dict, db: Session) -> dict:
-        """
-        Full profile generation:
-        1. Read videos from DB
-        2. LLM analysis + Pydantic validation
-        3. Save to PostgreSQL (authoritative)
-        4. Sync to MongoDB creator_memory (learning store)
-        """
         orm_videos = self.fetch_videos(user_id=user_id, db=db)
 
         if not orm_videos:
@@ -255,7 +238,6 @@ class CreatorProfileAgent:
             db=db,
         )
 
-        # Sync the full LLM output (including viral_patterns) to MongoDB
         self._sync_to_mongodb(
             user_id=user_id,
             channel_id=channel_info["channel_id"],

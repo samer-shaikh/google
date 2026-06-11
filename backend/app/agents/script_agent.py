@@ -1,15 +1,10 @@
-from app.services.qwen_service import generate_response
+from app.services.llm_provider import generate_response
 from app.services.model_router import get_model
 from app.agents.research_agent import _profile_context
 from app.agents.utils import load_prompt
 
 
 def _hooks_context(successful_hooks: list[str]) -> str:
-    """
-    Build the successful hooks section injected into the script prompt.
-    Gives the LLM examples of hooks that actually worked for this creator
-    so it can produce hooks in the same style and quality level.
-    """
     if not successful_hooks:
         return ""
     recent = successful_hooks[-5:]
@@ -28,19 +23,10 @@ def script_agent(
     creator_profile: dict = {},
     successful_hooks: list[str] = [],
 ) -> str:
-    """
-    Write a full production YouTube script.
-
-    New in MCP Phase 1:
-      - successful_hooks: real hooks from creator's past content injected
-        as style reference so the LLM generates hooks in the creator's
-        proven style rather than generic openers.
-      - content_strengths now populated via creator_profile (from MongoDB)
-    """
     profile_ctx = _profile_context(creator_profile)
     hooks_ctx   = _hooks_context(successful_hooks)
 
-    audience   = creator_profile.get("audience", {}) if creator_profile else {}
+    audience = creator_profile.get("audience", {}) if creator_profile else {}
     audience_level = (
         audience.get("audience_level", "beginner")
         if isinstance(audience, dict) else "beginner"
@@ -58,8 +44,6 @@ def script_agent(
 
     prompt_template = load_prompt("script.txt")
 
-    # script.txt uses {profile_ctx}, {topic}, {research},
-    # {audience_type}, {audience_level}, {tone}, {selected_idea}
     enriched_profile_ctx = profile_ctx
     if hooks_ctx:
         enriched_profile_ctx = f"{profile_ctx}\n\n{hooks_ctx}"

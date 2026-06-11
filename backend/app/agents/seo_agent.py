@@ -1,7 +1,8 @@
-from app.services.qwen_service import generate_response
+from app.services.llm_provider import generate_response
 from app.services.model_router import get_model
 from app.agents.research_agent import _profile_context
 from app.agents.utils import load_prompt
+
 
 def seo_agent(
     topic: str,
@@ -11,7 +12,6 @@ def seo_agent(
 ):
     profile_ctx = _profile_context(creator_profile)
 
-    # Pull main topics for tag suggestions
     main_topics = []
     if creator_profile:
         raw = creator_profile.get("main_topics", creator_profile.get("topics", []))
@@ -28,7 +28,7 @@ def seo_agent(
         topic=topic,
         script=script,
         audience_type=audience_type,
-        main_topics=main_topics_str
+        main_topics=main_topics_str,
     )
 
     model = get_model(plan, "seo")

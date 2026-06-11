@@ -1,43 +1,24 @@
 """
 app/agents/content_gap_agent.py
 
-Content opportunity finder — the most impressive demo-able feature.
-
-Analyses THREE data sources:
-  1. MongoDB creator_memory.topic_history  — what the creator already covered
-  2. Elastic competitor_content            — what competitors are doing
-  3. Elastic audience_questions            — what audiences actually ask
-
-Returns a ranked list of content opportunities: topics the audience wants,
-competitors haven't saturated, and the creator hasn't covered yet.
-
-Output is saved to creator_memory.content_gaps for ResearchAgent to read.
-
-Can be called:
-  a) As a node in the LangGraph workflow (content_gap_check_node)
-  b) As a standalone endpoint POST /agent/content-gap (via route)
-  c) Directly in Python for testing
+Content opportunity finder.
+Analyses MongoDB topic_history + Elastic competitor/audience data
+to surface topics the creator hasn't covered yet.
 """
 import json
 import re
 import logging
 from typing import Optional
-from app.services.qwen_service import generate_response
+from app.services.llm_provider import generate_response
 from app.services.model_router import get_model
 
 log = logging.getLogger(__name__)
 
 
 def _fetch_topic_history(user_id: int) -> list[str]:
-    """
-    Pull creator's topic history from MongoDB.
-    Tries MCP first (richer query), falls back to direct PyMongo.
-    Uses a ThreadPoolExecutor so it never deadlocks inside LangGraph's event loop.
-    """
     import asyncio
     import concurrent.futures
 
-    # Try MCP path first
     try:
         from app.mcp.mongodb.mcp_runner import call_mcp_tool
 
@@ -61,7 +42,6 @@ def _fetch_topic_history(user_id: int) -> list[str]:
     except Exception as e:
         log.debug(f"[content_gap_agent] MCP fetch skipped: {e}")
 
-    # Fallback: direct PyMongo
     try:
         from app.mcp.mongodb.tools import find_one
         doc = find_one("creator_memory", {"user_id": user_id})
@@ -71,7 +51,6 @@ def _fetch_topic_history(user_id: int) -> list[str]:
 
 
 def _fetch_competitor_topics(niche: str) -> list[str]:
-    """Pull top competitor video titles from Elasticsearch."""
     try:
         from app.mcp.elastic.tools import search_competitor_content
         competitors = search_competitor_content(niche=niche, limit=20)
@@ -82,7 +61,6 @@ def _fetch_competitor_topics(niche: str) -> list[str]:
 
 
 def _fetch_audience_questions(niche: str) -> list[str]:
-    """Pull real audience questions from Elasticsearch."""
     try:
         from app.mcp.elastic.client import get_elastic_client
         client = get_elastic_client()
@@ -103,7 +81,6 @@ def _fetch_audience_questions(niche: str) -> list[str]:
 
 
 def _fetch_trending_topics(niche: str) -> list[str]:
-    """Pull trending topics from Elasticsearch."""
     try:
         from app.mcp.elastic.tools import search_trending_topics
         trends = search_trending_topics(niche=niche, days=30, limit=15)
@@ -114,7 +91,6 @@ def _fetch_trending_topics(niche: str) -> list[str]:
 
 
 def _save_gaps_to_mongodb(user_id: int, gaps: list[str]) -> None:
-    """Persist identified gaps to creator_memory.content_gaps."""
     if not gaps or not user_id:
         return
     try:
@@ -143,9 +119,9 @@ def _build_gap_prompt(
     trending_topics: list[str],
 ) -> str:
     already_covered = "\n".join(f"  - {t}" for t in topic_history[-15:]) or "  (none yet)"
-    competitors = "\n".join(f"  - {t}" for t in competitor_titles[:15]) or "  (no data)"
-    questions = "\n".join(f"  - {q}" for q in audience_questions[:15]) or "  (no data)"
-    trending = "\n".join(f"  - {t}" for t in trending_topics[:10]) or "  (no data)"
+    competitors      = "\n".join(f"  - {t}" for t in competitor_titles[:15]) or "  (no data)"
+    questions        = "\n".join(f"  - {q}" for q in audience_questions[:15]) or "  (no data)"
+    trending         = "\n".join(f"  - {t}" for t in trending_topics[:10]) or "  (no data)"
 
     return f"""
 You are a YouTube content strategist specializing in content gap analysis.
@@ -195,26 +171,14 @@ def content_gap_agent(
 ) -> list[dict]:
     """
     Identify content gaps and opportunities for a creator.
-
-    Args:
-        user_id:       Used to fetch creator's topic history from MongoDB
-        niche:         Creator's niche (e.g. "Python programming")
-        plan:          Model plan
-        topic_history: Optional pre-loaded history (skips MongoDB fetch if provided)
-
-    Returns:
-        List of opportunity dicts with keys: topic, opportunity_reason,
-        suggested_angle, urgency, estimated_audience_demand
-
     Always returns a list — never raises.
     """
     print(f"[content_gap_agent] analysing gaps for niche='{niche}' user={user_id}")
 
-    # Gather all data sources (all fail silently)
-    history = topic_history if topic_history is not None else _fetch_topic_history(user_id)
-    competitor_titles = _fetch_competitor_topics(niche)
+    history            = topic_history if topic_history is not None else _fetch_topic_history(user_id)
+    competitor_titles  = _fetch_competitor_topics(niche)
     audience_questions = _fetch_audience_questions(niche)
-    trending = _fetch_trending_topics(niche)
+    trending           = _fetch_trending_topics(niche)
 
     print(
         f"[content_gap_agent] data: "
@@ -232,15 +196,13 @@ def content_gap_agent(
 
     try:
         model = get_model(plan, "research")
-        raw = generate_response(prompt, model)
+        raw   = generate_response(prompt, model)
         cleaned = re.sub(r"```[a-z]*", "", raw).strip().strip("`").strip()
-        gaps = json.loads(cleaned)
+        gaps    = json.loads(cleaned)
 
         if isinstance(gaps, list):
-            # Persist to MongoDB
             gap_topics = [g.get("topic", "") for g in gaps if g.get("topic")]
             _save_gaps_to_mongodb(user_id, gap_topics)
-
             print(f"[content_gap_agent] found {len(gaps)} opportunities")
             return gaps[:5]
         return []
